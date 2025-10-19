@@ -7,7 +7,6 @@
 #include "base/memory/ref_counted_memory.h"
 #include "base/trace_event/trace_event.h"
 #include "content/public/renderer/render_frame.h"
-#include "ipc/ipc_message_macros.h"
 #include "net/base/net_module.h"
 #include "net/grit/net_resources.h"
 #include "services/service_manager/public/cpp/interface_provider.h"
@@ -148,11 +147,11 @@ void ElectronRenderFrameObserver::DidInstallConditionalFeatures(
 }
 
 void ElectronRenderFrameObserver::WillReleaseScriptContext(
+    v8::Isolate* const isolate,
     v8::Local<v8::Context> context,
     int world_id) {
   if (ShouldNotifyClient(world_id))
-    renderer_client_->WillReleaseScriptContext(context->GetIsolate(), context,
-                                               render_frame_);
+    renderer_client_->WillReleaseScriptContext(isolate, context, render_frame_);
 }
 
 void ElectronRenderFrameObserver::OnDestruct() {

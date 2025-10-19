@@ -178,6 +178,8 @@ class App final : public gin::Wrappable<App>,
       const content::ChildProcessTerminationInfo& info) override;
 
  private:
+  [[nodiscard]] static base::FilePath GetDefaultAppLogPath();
+
   void BrowserChildProcessCrashedOrKilled(
       const content::ChildProcessData& data,
       const content::ChildProcessTerminationInfo& info);
@@ -190,8 +192,7 @@ class App final : public gin::Wrappable<App>,
                             const std::string& name = std::string());
   void ChildProcessDisconnected(content::ChildProcessId pid);
 
-  void SetAppLogsPath(gin_helper::ErrorThrower thrower,
-                      std::optional<base::FilePath> custom_path);
+  void SetAppLogsPath(gin::Arguments* args);
 
   // Get/Set the pre-defined path in PathService.
   base::FilePath GetPath(gin_helper::ErrorThrower thrower,
@@ -258,7 +259,7 @@ class App final : public gin::Wrappable<App>,
   v8::Local<v8::Value> GetJumpListSettings();
 
   // Set or remove a custom Jump List for the application.
-  JumpListResult SetJumpList(v8::Local<v8::Value> val, gin::Arguments* args);
+  JumpListResult SetJumpList(v8::Isolate* isolate, v8::Local<v8::Value> val);
 #endif  // BUILDFLAG(IS_WIN)
 
   std::unique_ptr<ProcessSingleton> process_singleton_;
@@ -282,8 +283,6 @@ class App final : public gin::Wrappable<App>,
   bool watch_singleton_socket_on_ready_ = false;
 
   std::unique_ptr<content::ScopedAccessibilityMode> scoped_accessibility_mode_;
-
-  static cppgc::Persistent<App> instance_;
 };
 
 }  // namespace api

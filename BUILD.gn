@@ -586,6 +586,11 @@ source_set("electron_lib") {
   }
 
   if (is_mac) {
+    # Disable C++ modules to resolve linking error when including MacOS SDK
+    # headers from third_party/electron_node/deps/uv/include/uv/darwin.h
+    # TODO(samuelmaddock): consider revisiting this in the future
+    use_libcxx_modules = false
+
     deps += [
       "//components/remote_cocoa/app_shim",
       "//components/remote_cocoa/browser",
@@ -655,6 +660,7 @@ source_set("electron_lib") {
       "//ui/events/devices/x11",
       "//ui/events/platform/x11",
       "//ui/gtk:gtk_config",
+      "//ui/linux:display_server_utils",
       "//ui/linux:linux_ui",
       "//ui/linux:linux_ui_factory",
       "//ui/wm",
@@ -688,7 +694,6 @@ source_set("electron_lib") {
       "//components/app_launch_prefetch",
       "//components/crash/core/app:crash_export_thunks",
       "//third_party/libxml:xml_writer",
-      "//ui/native_theme:native_theme_browser",
       "//ui/wm",
       "//ui/wm/public",
     ]
