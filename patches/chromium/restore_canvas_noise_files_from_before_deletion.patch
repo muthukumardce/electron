@@ -1,0 +1,247 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Mon, 15 Dec 2025 20:25:51 +0530
+Subject: Restore canvas noise files from before deletion
+
+
+diff --git a/components/fingerprinting_protection_filter/interventions/common/BUILD.gn b/components/fingerprinting_protection_filter/interventions/common/BUILD.gn
+new file mode 100644
+index 0000000000000000000000000000000000000000..e33c3433a633a016f2e3962ce816b87207e8dca1
+--- /dev/null
++++ b/components/fingerprinting_protection_filter/interventions/common/BUILD.gn
+@@ -0,0 +1,18 @@
++﻿# Copyright 2025 The Chromium Authors
++# Use of this source code is governed by a BSD-style license that can be
++# found in the LICENSE file.
++
++import("//build/config/features.gni")
++
++# For this component iOS is explicitly not supported.
++if (use_blink) {
++  component("features") {
++    output_name = "fingerprinting_protection_interventions_features"
++    defines = [ "IS_FINGERPRINTING_PROTECTION_INTERVENTIONS_FEATURES_IMPL" ]
++    sources = [
++      "interventions_features.cc",
++      "interventions_features.h",
++    ]
++    deps = [ "//base" ]
++  }
++}
+diff --git a/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc b/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..5ed4d26b7a7c61b3d4b2f5b974c8da90fd96e575
+--- /dev/null
++++ b/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc
+@@ -0,0 +1,29 @@
++﻿// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "components/fingerprinting_protection_filter/interventions/common/interventions_features.h"
++
++#include "base/feature_list.h"
++
++namespace fingerprinting_protection_interventions::features {
++
++// Whether the canvas interventions should be enabled that add noise to the
++// readback values.
++BASE_FEATURE(kCanvasNoise, base::FeatureState::FEATURE_DISABLED_BY_DEFAULT);
++
++BASE_FEATURE_PARAM(bool,
++                   kCanvasNoiseInRegularMode,
++                   &kCanvasNoise,
++                   "enable_in_regular_mode",
++                   false);
++
++bool IsCanvasInterventionsEnabledForIncognitoState(bool is_incognito) {
++  if (is_incognito) {
++    return base::FeatureList::IsEnabled(kCanvasNoise);
++  }
++  return base::FeatureList::IsEnabled(kCanvasNoise) &&
++         kCanvasNoiseInRegularMode.Get();
++}
++
++}  // namespace fingerprinting_protection_interventions::features
+diff --git a/components/fingerprinting_protection_filter/interventions/common/interventions_features.h b/components/fingerprinting_protection_filter/interventions/common/interventions_features.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..164e5360f320ef4b6d936fab8ea49147baa2d027
+--- /dev/null
++++ b/components/fingerprinting_protection_filter/interventions/common/interventions_features.h
+@@ -0,0 +1,28 @@
++﻿// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef COMPONENTS_FINGERPRINTING_PROTECTION_FILTER_INTERVENTIONS_COMMON_INTERVENTIONS_FEATURES_H_
++#define COMPONENTS_FINGERPRINTING_PROTECTION_FILTER_INTERVENTIONS_COMMON_INTERVENTIONS_FEATURES_H_
++
++#include "base/component_export.h"
++#include "base/feature_list.h"
++#include "base/metrics/field_trial_params.h"
++
++namespace fingerprinting_protection_interventions::features {
++
++COMPONENT_EXPORT(FINGERPRINTING_PROTECTION_INTERVENTIONS_FEATURES)
++BASE_DECLARE_FEATURE(kCanvasNoise);
++COMPONENT_EXPORT(FINGERPRINTING_PROTECTION_INTERVENTIONS_FEATURES)
++BASE_DECLARE_FEATURE_PARAM(bool, kCanvasNoiseInRegularMode);
++
++// Returns true if canvas interventions should be enabled for the provided
++// Incognito state.
++COMPONENT_EXPORT(FINGERPRINTING_PROTECTION_INTERVENTIONS_FEATURES)
++bool IsCanvasInterventionsEnabledForIncognitoState(bool is_incognito);
++
++// TODO(crbug.com/380463018): Add base::FeatureParams for signatures.
++
++}  // namespace fingerprinting_protection_interventions::features
++
++#endif  // COMPONENTS_FINGERPRINTING_PROTECTION_FILTER_INTERVENTIONS_COMMON_INTERVENTIONS_FEATURES_H_
+diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.cc b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..af2a732a036eec2662b369c14e6cd3d66cd4e61d
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
+@@ -0,0 +1,90 @@
++﻿// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/fingerprinting_protection/canvas_noise_token_data.h"
++
++#include <cstdint>
++#include <memory>
++#include <string_view>
++
++#include "base/containers/span.h"
++#include "base/feature_list.h"
++#include "base/hash/hash.h"
++#include "base/numerics/byte_conversions.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/supports_user_data.h"
++#include "base/types/pass_key.h"
++#include "base/unguessable_token.h"
++#include "components/fingerprinting_protection_filter/interventions/common/interventions_features.h"
++#include "content/public/browser/browser_context.h"
++#include "crypto/hash.h"
++#include "net/base/network_anonymization_key.h"
++#include "net/base/schemeful_site.h"
++#include "third_party/blink/public/common/features.h"
++#include "url/origin.h"
++#include "url/scheme_host_port.h"
++
++namespace content {
++
++namespace {
++const void* const kBrowserContextCanvasNoiseTokenKey =
++    &kBrowserContextCanvasNoiseTokenKey;
++
++// FNV constants
++// https://datatracker.ietf.org/doc/html/draft-eastlake-fnv#name-fnv-constants
++constexpr uint64_t kFnvPrime = 0x00000100000001b3;
++constexpr uint64_t kFnvOffset = 0xcbf29ce484222325;
++
++blink::NoiseToken DeriveInitialNoiseHash(blink::NoiseToken token,
++                                         std::string_view domain) {
++  uint64_t token_hash = kFnvOffset;
++  crypto::hash::Hasher hasher(crypto::hash::kSha256);
++  hasher.Update(base::U64ToLittleEndian(token.Value()));
++  hasher.Update(base::as_byte_span(domain));
++  std::array<uint8_t, crypto::hash::kSha256Size> digest;
++  hasher.Finish(digest);
++  token_hash ^= base::U64FromLittleEndian(base::span(digest).first<8>());
++  token_hash *= kFnvPrime;
++  return blink::NoiseToken(token_hash);
++}
++}  // namespace
++
++// static
++blink::NoiseToken CanvasNoiseTokenData::GetBrowserToken(
++    BrowserContext* context) {
++  CHECK(base::FeatureList::IsEnabled(
++      fingerprinting_protection_interventions::features::kCanvasNoise));
++
++  CanvasNoiseTokenData* data = static_cast<CanvasNoiseTokenData*>(
++      context->GetUserData(&kBrowserContextCanvasNoiseTokenKey));
++  if (data != nullptr) {
++    return data->session_token_;
++  }
++  return CanvasNoiseTokenData::SetNewToken(context);
++}
++
++// static
++blink::NoiseToken CanvasNoiseTokenData::GetToken(BrowserContext* context,
++                                                 const url::Origin& origin) {
++  if (!origin.opaque()) {
++    return DeriveInitialNoiseHash(GetBrowserToken(context), origin.Serialize());
++  }
++  return DeriveInitialNoiseHash(GetBrowserToken(context),
++                                base::UnguessableToken::Create().ToString());
++}
++
++// static
++blink::NoiseToken CanvasNoiseTokenData::SetNewToken(BrowserContext* context) {
++  CHECK(base::FeatureList::IsEnabled(
++      fingerprinting_protection_interventions::features::kCanvasNoise));
++
++  auto new_data = std::make_unique<CanvasNoiseTokenData>();
++  blink::NoiseToken token = new_data->session_token_;
++  context->SetUserData(&kBrowserContextCanvasNoiseTokenKey,
++                       std::move(new_data));
++  return token;
++}
++
++}  // namespace content
+diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.h b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f15dd282073ce1077f80a330b21b593dbe363c4
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
+@@ -0,0 +1,46 @@
++﻿// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_BROWSER_FINGERPRINTING_PROTECTION_CANVAS_NOISE_TOKEN_DATA_H_
++#define CONTENT_BROWSER_FINGERPRINTING_PROTECTION_CANVAS_NOISE_TOKEN_DATA_H_
++
++#include <cstdint>
++
++#include "base/rand_util.h"
++#include "content/public/browser/browser_context.h"
++#include "third_party/blink/public/common/fingerprinting_protection/noise_token.h"
++#include "url/origin.h"
++
++namespace content {
++
++// TODO(https://crbug.com/442616874): Key CanvasNoiseTokens by (BrowserContext,
++// StorageKey) instead of (BrowserContext, Origin).
++
++// A user data class that generates and stores BrowserContext-associated noise
++// tokens used for canvas noising.
++class CONTENT_EXPORT CanvasNoiseTokenData
++    : public base::SupportsUserData::Data {
++ public:
++  CanvasNoiseTokenData() = default;
++
++  // Gets the 64 bit BrowserContext-associated noise token computed with the
++  // main frame's |origin|. If the origin is opaque, a random value will be
++  // used.
++  static blink::NoiseToken GetToken(BrowserContext* context,
++                                    const url::Origin& origin);
++
++  // Regenerates the noise token, returning the updated token value.
++  static blink::NoiseToken SetNewToken(BrowserContext* context);
++
++ private:
++  // Helper to generate the 64 bit BrowserContext-associated token, which will
++  // be different per BrowserContext.
++  static blink::NoiseToken GetBrowserToken(BrowserContext* context);
++
++  blink::NoiseToken session_token_{base::RandUint64()};
++};
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_FINGERPRINTING_PROTECTION_CANVAS_NOISE_TOKEN_DATA_H_

@@ -19,7 +19,7 @@ preload architecture is redesigned to work without modifying sandbox
 attributes, or until an alternative approach is implemented.
 
 diff --git a/third_party/blink/renderer/core/html/html_iframe_element.cc b/third_party/blink/renderer/core/html/html_iframe_element.cc
-index b89071d26a9eef14cb8652cd587de112a2df052f..4fc6eb21ac948aa0630e7e9543efef2eed18c1ed 100644
+index e3a7ee961e980334460f13a08faef7851af83dda..f39767f108dd72c44301acf57cd843236adb7224 100644
 --- a/third_party/blink/renderer/core/html/html_iframe_element.cc
 +++ b/third_party/blink/renderer/core/html/html_iframe_element.cc
 @@ -205,6 +205,31 @@ void HTMLIFrameElement::ParseAttribute(
