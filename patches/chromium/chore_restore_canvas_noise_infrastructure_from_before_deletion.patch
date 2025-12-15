@@ -1,8 +1,25 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Muthukumar <muthukumardce@gmail.com>
-Date: Mon, 15 Dec 2025 20:25:51 +0530
-Subject: Restore canvas noise files from before deletion
+Date: Tue, 16 Dec 2025 00:03:06 +0530
+Subject: chore: restore canvas noise infrastructure from before deletion
 
+Restore canvas noise files that were deleted in Chromium commit
+c4435dd289abf (Oct 31, 2025) as part of Privacy Sandbox deprecation.
+
+These files provide the browser-side infrastructure for canvas noise
+fingerprinting protection feature including:
+- Feature flags (kCanvasNoise)
+- Browser token generation and storage (CanvasNoiseTokenData)
+- Origin-specific token derivation
+- BrowserContext integration
+
+Files restored from commit c4435dd289abf^:
+- components/fingerprinting_protection_filter/interventions/common/BUILD.gn
+- components/fingerprinting_protection_filter/interventions/common/interventions_features.{cc,h}
+- content/browser/fingerprinting_protection/DEPS
+- content/browser/fingerprinting_protection/OWNERS
+- content/browser/fingerprinting_protection/canvas_noise_token_data.{cc,h}
+- content/browser/fingerprinting_protection/canvas_noise_token_data_browsertest.cc
 
 diff --git a/components/fingerprinting_protection_filter/interventions/common/BUILD.gn b/components/fingerprinting_protection_filter/interventions/common/BUILD.gn
 new file mode 100644
@@ -30,11 +47,11 @@ index 0000000000000000000000000000000000000000..c27eab2a4dde4bd3f0c1452dad7ed8e6
 +}
 diff --git a/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc b/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..5ed4d26b7a7c61b3d4b2f5b974c8da90fd96e575
+index 0000000000000000000000000000000000000000..72d5e3d5c17c65f8b6fa04e8e0fb635ec99c7295
 --- /dev/null
 +++ b/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc
 @@ -0,0 +1,29 @@
-+﻿// Copyright 2024 The Chromium Authors
++// Copyright 2024 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -65,11 +82,11 @@ index 0000000000000000000000000000000000000000..5ed4d26b7a7c61b3d4b2f5b974c8da90
 +}  // namespace fingerprinting_protection_interventions::features
 diff --git a/components/fingerprinting_protection_filter/interventions/common/interventions_features.h b/components/fingerprinting_protection_filter/interventions/common/interventions_features.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..164e5360f320ef4b6d936fab8ea49147baa2d027
+index 0000000000000000000000000000000000000000..f68daca6733a85295503fe8571c599477fa6469d
 --- /dev/null
 +++ b/components/fingerprinting_protection_filter/interventions/common/interventions_features.h
 @@ -0,0 +1,28 @@
-+﻿// Copyright 2024 The Chromium Authors
++// Copyright 2024 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -97,13 +114,30 @@ index 0000000000000000000000000000000000000000..164e5360f320ef4b6d936fab8ea49147
 +}  // namespace fingerprinting_protection_interventions::features
 +
 +#endif  // COMPONENTS_FINGERPRINTING_PROTECTION_FILTER_INTERVENTIONS_COMMON_INTERVENTIONS_FEATURES_H_
+diff --git a/content/browser/fingerprinting_protection/DEPS b/content/browser/fingerprinting_protection/DEPS
+new file mode 100644
+index 0000000000000000000000000000000000000000..ec96158d0c5a7ed7dc86dbaa9f7bce6f0f02f12d
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/DEPS
+@@ -0,0 +1,3 @@
++include_rules = [
++  "+components/fingerprinting_protection_filter/interventions/common",
++]
+diff --git a/content/browser/fingerprinting_protection/OWNERS b/content/browser/fingerprinting_protection/OWNERS
+new file mode 100644
+index 0000000000000000000000000000000000000000..5212975dc38d269b9d682d2acf675486d4e637e2
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/OWNERS
+@@ -0,0 +1,2 @@
++file://third_party/blink/public/common/fingerprinting_protection/OWNERS
++
 diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.cc b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
 new file mode 100644
-index 0000000000000000000000000000000000000000..af2a732a036eec2662b369c14e6cd3d66cd4e61d
+index 0000000000000000000000000000000000000000..eec809e0edbf4b362e120dad0194a38c6f71acb6
 --- /dev/null
 +++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
 @@ -0,0 +1,90 @@
-+﻿// Copyright 2025 The Chromium Authors
++// Copyright 2025 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -195,11 +229,11 @@ index 0000000000000000000000000000000000000000..af2a732a036eec2662b369c14e6cd3d6
 +}  // namespace content
 diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.h b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..5f15dd282073ce1077f80a330b21b593dbe363c4
+index 0000000000000000000000000000000000000000..818250095ef94eab25439b6767f5ab2150f6ce25
 --- /dev/null
 +++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
 @@ -0,0 +1,46 @@
-+﻿// Copyright 2025 The Chromium Authors
++// Copyright 2025 The Chromium Authors
 +// Use of this source code is governed by a BSD-style license that can be
 +// found in the LICENSE file.
 +
@@ -245,3 +279,53 @@ index 0000000000000000000000000000000000000000..5f15dd282073ce1077f80a330b21b593
 +}  // namespace content
 +
 +#endif  // CONTENT_BROWSER_FINGERPRINTING_PROTECTION_CANVAS_NOISE_TOKEN_DATA_H_
+diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data_browsertest.cc b/content/browser/fingerprinting_protection/canvas_noise_token_data_browsertest.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..c4ade0fe8f6c9882941e90cd8b43ec8a825d9981
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/canvas_noise_token_data_browsertest.cc
+@@ -0,0 +1,44 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/fingerprinting_protection/canvas_noise_token_data.h"
++
++#include "base/test/scoped_feature_list.h"
++#include "components/fingerprinting_protection_filter/interventions/common/interventions_features.h"
++#include "content/browser/web_contents/web_contents_impl.h"
++#include "content/public/test/browser_test.h"
++#include "content/public/test/content_browser_test.h"
++#include "content/shell/browser/shell.h"
++#include "content/shell/browser/shell_browser_context.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "testing/gtest/include/gtest/gtest.h"
++
++namespace content {
++
++class CanvasNoiseTokenDataBrowserTest : public content::ContentBrowserTest {
++ public:
++  CanvasNoiseTokenDataBrowserTest() = default;
++
++  void TearDown() override { scoped_feature_list_.Reset(); }
++
++ private:
++  base::test::ScopedFeatureList scoped_feature_list_{
++      fingerprinting_protection_interventions::features::kCanvasNoise};
++};
++
++IN_PROC_BROWSER_TEST_F(CanvasNoiseTokenDataBrowserTest,
++                       DifferentBrowserContextDifferCanvasNoiseTokens) {
++  blink::NoiseToken normal_token = CanvasNoiseTokenData::GetToken(
++      CreateBrowser()->web_contents()->GetBrowserContext(),
++      url::Origin::Create(GURL("https://example.test")));
++  blink::NoiseToken incognito_token = CanvasNoiseTokenData::GetToken(
++      CreateOffTheRecordBrowser()->web_contents()->GetBrowserContext(),
++      url::Origin::Create(GURL("https://example.test")));
++
++  EXPECT_NE(normal_token.Value(), 0UL);
++  EXPECT_NE(incognito_token.Value(), 0UL);
++  EXPECT_NE(normal_token, incognito_token);
++}
++
++}  // namespace content

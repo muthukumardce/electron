@@ -50,7 +50,7 @@ index b4987a0fc6c6b9b1fcb6122ebf868f7df4949756..52bf45515b44285b5de5b3e0dbc99f5c
    bool UsePreloadServingMetrics() override;
  #if !BUILDFLAG(IS_ANDROID)
 diff --git a/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc b/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc
-index 5ed4d26b7a7c61b3d4b2f5b974c8da90fd96e575..13db4ed57e0945e97d4f709173c713e5a7a5bfea 100644
+index 72d5e3d5c17c65f8b6fa04e8e0fb635ec99c7295..e525a355881fd396b14543e1f619db0141a45a88 100644
 --- a/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc
 +++ b/components/fingerprinting_protection_filter/interventions/common/interventions_features.cc
 @@ -10,13 +10,13 @@ namespace fingerprinting_protection_interventions::features {
@@ -91,7 +91,7 @@ index b8c367a2aa4d2f2fe9bec95393ae8f8150371e44..575a7baecca4b9a4c510430956ba3498
      "first_party_sets/database/first_party_sets_database.h",
      "first_party_sets/first_party_set_parser.cc",
 diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.cc b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
-index af2a732a036eec2662b369c14e6cd3d66cd4e61d..ad7bc712bf79b2356b77471133c82f0239abb7c2 100644
+index eec809e0edbf4b362e120dad0194a38c6f71acb6..11532d93e28aa1aca169f488e73b3ca49de615c2 100644
 --- a/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
 +++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
 @@ -8,15 +8,20 @@
@@ -226,7 +226,7 @@ index af2a732a036eec2662b369c14e6cd3d66cd4e61d..ad7bc712bf79b2356b77471133c82f02
 +
  }  // namespace content
 diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.h b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
-index 5f15dd282073ce1077f80a330b21b593dbe363c4..d4b48d276832747e745d99cc0902a89eda357bc6 100644
+index 818250095ef94eab25439b6767f5ab2150f6ce25..7058fc30f12e377d405778fc3e294cb4db7ce87c 100644
 --- a/content/browser/fingerprinting_protection/canvas_noise_token_data.h
 +++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
 @@ -33,6 +33,11 @@ class CONTENT_EXPORT CanvasNoiseTokenData
