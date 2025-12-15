@@ -13,7 +13,7 @@ to produce consistent but different Math results across tabs.
 - Default: seed = 0 (no fingerprinting protection)
 
 diff --git a/src/builtins/math.tq b/src/builtins/math.tq
-index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7ff47e6b74 100644
+index a8e561fc1e2d9231df2218eba3d1ee5511286b39..10dcbb4383def4685d0ed685c293462e17dcd9b0 100644
 --- a/src/builtins/math.tq
 +++ b/src/builtins/math.tq
 @@ -4,6 +4,37 @@
@@ -54,7 +54,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  transitioning macro ReduceToSmiOrFloat64(implicit context: Context)(
                                           x: JSAny): never
      labels SmiResult(Smi), Float64Result(float64) {
-@@ -162,7 +193,9 @@ extern macro Float64Acos(float64): float64;
+@@ -161,7 +192,9 @@ extern macro Float64Acos(float64): float64;
  transitioning javascript builtin MathAcos(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -65,7 +65,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.acosh
-@@ -171,7 +204,9 @@ extern macro Float64Acosh(float64): float64;
+@@ -170,7 +203,9 @@ extern macro Float64Acosh(float64): float64;
  transitioning javascript builtin MathAcosh(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -76,7 +76,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.asin
-@@ -180,7 +215,9 @@ extern macro Float64Asin(float64): float64;
+@@ -179,7 +214,9 @@ extern macro Float64Asin(float64): float64;
  transitioning javascript builtin MathAsin(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -87,7 +87,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.asinh
-@@ -189,7 +226,9 @@ extern macro Float64Asinh(float64): float64;
+@@ -188,7 +225,9 @@ extern macro Float64Asinh(float64): float64;
  transitioning javascript builtin MathAsinh(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -98,7 +98,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.atan
-@@ -198,7 +237,9 @@ extern macro Float64Atan(float64): float64;
+@@ -197,7 +236,9 @@ extern macro Float64Atan(float64): float64;
  transitioning javascript builtin MathAtan(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -109,7 +109,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.atan2
-@@ -208,7 +249,9 @@ transitioning javascript builtin MathAtan2(
+@@ -207,7 +248,9 @@ transitioning javascript builtin MathAtan2(
      js-implicit context: NativeContext)(y: JSAny, x: JSAny): Number {
    const yValue = Convert<float64>(ToNumber_Inline(y));
    const xValue = Convert<float64>(ToNumber_Inline(x));
@@ -120,7 +120,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.atanh
-@@ -217,7 +260,9 @@ extern macro Float64Atanh(float64): float64;
+@@ -216,7 +259,9 @@ extern macro Float64Atanh(float64): float64;
  transitioning javascript builtin MathAtanh(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -131,7 +131,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.cbrt
-@@ -226,7 +271,9 @@ extern macro Float64Cbrt(float64): float64;
+@@ -225,7 +270,9 @@ extern macro Float64Cbrt(float64): float64;
  transitioning javascript builtin MathCbrt(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -142,7 +142,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.clz32
-@@ -244,7 +291,9 @@ extern macro Float64Cos(float64): float64;
+@@ -243,7 +290,9 @@ extern macro Float64Cos(float64): float64;
  transitioning javascript builtin MathCos(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -153,7 +153,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.cosh
-@@ -253,7 +302,9 @@ extern macro Float64Cosh(float64): float64;
+@@ -252,7 +301,9 @@ extern macro Float64Cosh(float64): float64;
  transitioning javascript builtin MathCosh(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -164,7 +164,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.exp
-@@ -262,7 +313,9 @@ extern macro Float64Exp(float64): float64;
+@@ -261,7 +312,9 @@ extern macro Float64Exp(float64): float64;
  transitioning javascript builtin MathExp(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -175,7 +175,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.expm1
-@@ -271,7 +324,9 @@ extern macro Float64Expm1(float64): float64;
+@@ -270,7 +323,9 @@ extern macro Float64Expm1(float64): float64;
  transitioning javascript builtin MathExpm1(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -186,7 +186,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.fround
-@@ -305,7 +360,9 @@ extern macro Float64Log(float64): float64;
+@@ -304,7 +359,9 @@ extern macro Float64Log(float64): float64;
  transitioning javascript builtin MathLog(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -197,7 +197,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.log1p
-@@ -314,7 +371,9 @@ extern macro Float64Log1p(float64): float64;
+@@ -313,7 +370,9 @@ extern macro Float64Log1p(float64): float64;
  transitioning javascript builtin MathLog1p(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -208,7 +208,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.log10
-@@ -323,7 +382,9 @@ extern macro Float64Log10(float64): float64;
+@@ -322,7 +381,9 @@ extern macro Float64Log10(float64): float64;
  transitioning javascript builtin MathLog10(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -219,7 +219,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.log2
-@@ -332,7 +393,9 @@ extern macro Float64Log2(float64): float64;
+@@ -331,7 +392,9 @@ extern macro Float64Log2(float64): float64;
  transitioning javascript builtin MathLog2(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -230,7 +230,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.sin
-@@ -341,7 +404,9 @@ extern macro Float64Sin(float64): float64;
+@@ -340,7 +403,9 @@ extern macro Float64Sin(float64): float64;
  transitioning javascript builtin MathSin(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -241,7 +241,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.sign
-@@ -365,7 +430,9 @@ extern macro Float64Sinh(float64): float64;
+@@ -364,7 +429,9 @@ extern macro Float64Sinh(float64): float64;
  transitioning javascript builtin MathSinh(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -252,7 +252,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.sqrt
-@@ -374,7 +441,9 @@ extern macro Float64Sqrt(float64): float64;
+@@ -373,7 +440,9 @@ extern macro Float64Sqrt(float64): float64;
  transitioning javascript builtin MathSqrt(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -263,7 +263,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.tan
-@@ -383,7 +452,9 @@ extern macro Float64Tan(float64): float64;
+@@ -382,7 +451,9 @@ extern macro Float64Tan(float64): float64;
  transitioning javascript builtin MathTan(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -274,7 +274,7 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  }
  
  // ES6 #sec-math.tanh
-@@ -392,7 +463,21 @@ extern macro Float64Tanh(float64): float64;
+@@ -391,7 +462,21 @@ extern macro Float64Tanh(float64): float64;
  transitioning javascript builtin MathTanh(
      js-implicit context: NativeContext)(x: JSAny): Number {
    const value = Convert<float64>(ToNumber_Inline(x));
@@ -298,10 +298,10 @@ index 8a63e3e1d49c40d04065b0bf5b6555fc009eef38..7d12621d897d2df564408350bb98cc7f
  
  // Fast path for few arguments to avoid loop comparison.
 diff --git a/src/heap/factory.cc b/src/heap/factory.cc
-index 6c69bcbe95b8c7360f8385f84b581be81a3c243b..f7fdb7f885cd048a199035b3bf39e1f974716490 100644
+index 5c88579d9ea3910c5d01b924df5d88a06204487c..b2da5c97e69f9dbc820e657f6d173d39b777a38b 100644
 --- a/src/heap/factory.cc
 +++ b/src/heap/factory.cc
-@@ -1344,6 +1344,7 @@ Handle<NativeContext> Factory::NewNativeContext() {
+@@ -1346,6 +1346,7 @@ Handle<NativeContext> Factory::NewNativeContext() {
    context->set_is_wasm_js_installed(Smi::zero());
    context->set_is_wasm_jspi_installed(Smi::zero());
    context->set_math_random_index(Smi::zero());
@@ -310,7 +310,7 @@ index 6c69bcbe95b8c7360f8385f84b581be81a3c243b..f7fdb7f885cd048a199035b3bf39e1f9
    context->init_microtask_queue(isolate(), nullptr);
    context->set_retained_maps(*empty_weak_array_list());
 diff --git a/src/init/bootstrapper.cc b/src/init/bootstrapper.cc
-index fb436382bc8c473047674f88be33d21b84b15a26..69a51d29f94e8990a4d9129854a024f8177e0540 100644
+index 4a8837a7150b164f59efedc07d4c4f31fd6f8e1f..bf27a61762548dc16028a2da8fa7212487c690ae 100644
 --- a/src/init/bootstrapper.cc
 +++ b/src/init/bootstrapper.cc
 @@ -3516,6 +3516,10 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
@@ -325,10 +325,10 @@ index fb436382bc8c473047674f88be33d21b84b15a26..69a51d29f94e8990a4d9129854a024f8
      double const kE = base::ieee754::exp(1.0);
      double const kPI = 3.1415926535897932;
 diff --git a/src/objects/contexts.h b/src/objects/contexts.h
-index 17624a909ad4050249a541a50afdf312f0eed86d..c7ce1df44cc03ff586781f82d03bb95c13845186 100644
+index 32423381e3e39043138fc94ce4b2395cc13816be..1d86314a4dc1a00ac376374c27b216dbb7d3a327 100644
 --- a/src/objects/contexts.h
 +++ b/src/objects/contexts.h
-@@ -274,6 +274,7 @@ enum ContextLookupFlags {
+@@ -276,6 +276,7 @@ enum ContextLookupFlags {
    V(MATH_RANDOM_INDEX_INDEX, Smi, math_random_index)                           \
    V(MATH_RANDOM_STATE_INDEX, ByteArray, math_random_state)                     \
    V(MATH_RANDOM_CACHE_INDEX, FixedDoubleArray, math_random_cache)              \
@@ -337,10 +337,10 @@ index 17624a909ad4050249a541a50afdf312f0eed86d..c7ce1df44cc03ff586781f82d03bb95c
    V(NUMBER_FUNCTION_INDEX, JSFunction, number_function)                        \
    V(OBJECT_FUNCTION_INDEX, JSFunction, object_function)                        \
 diff --git a/src/objects/contexts.tq b/src/objects/contexts.tq
-index db515f76b00769f962dda78386bd8d557d300554..3be03004163acc5fc775391c617db60aae0af4bb 100644
+index cd5dc9a357986426038b2189f9fea5f8482953ac..29f178ca20680b1928351b3466b8dd30325b4192 100644
 --- a/src/objects/contexts.tq
 +++ b/src/objects/contexts.tq
-@@ -156,6 +156,7 @@ extern enum ContextSlot extends intptr constexpr 'Context::Field' {
+@@ -155,6 +155,7 @@ extern enum ContextSlot extends intptr constexpr 'Context::Field' {
    JS_SET_MAP_INDEX: Slot<NativeContext, Map>,
    MATH_RANDOM_CACHE_INDEX: Slot<NativeContext, FixedDoubleArray>,
    MATH_RANDOM_INDEX_INDEX: Slot<NativeContext, Smi>,

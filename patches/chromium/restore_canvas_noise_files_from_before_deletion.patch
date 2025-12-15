@@ -6,11 +6,11 @@ Subject: Restore canvas noise files from before deletion
 
 diff --git a/components/fingerprinting_protection_filter/interventions/common/BUILD.gn b/components/fingerprinting_protection_filter/interventions/common/BUILD.gn
 new file mode 100644
-index 0000000000000000000000000000000000000000..e33c3433a633a016f2e3962ce816b87207e8dca1
+index 0000000000000000000000000000000000000000..c27eab2a4dde4bd3f0c1452dad7ed8e6042e3483
 --- /dev/null
 +++ b/components/fingerprinting_protection_filter/interventions/common/BUILD.gn
 @@ -0,0 +1,18 @@
-+﻿# Copyright 2025 The Chromium Authors
++# Copyright 2025 The Chromium Authors
 +# Use of this source code is governed by a BSD-style license that can be
 +# found in the LICENSE file.
 +

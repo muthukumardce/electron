@@ -1,33 +1,16 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Muthukumar <muthukumardce@gmail.com>
-Date: Mon, 15 Dec 2025 20:38:50 +0530
-Subject: feat: add navigator.setUA() method to override User-Agent Client
- Hints
+Date: Mon, 15 Dec 2025 23:31:32 +0530
+Subject: feat: add navigator.setUA() method
 
-This commit implements a new navigator.userAgentData.setUA() method that
-allows customizing the values returned by getHighEntropyValues().
+Adds navigator.userAgentData.setUA() to override User-Agent Client Hints.
 
 Changes:
-- Added UAOverrideValues dictionary to navigator_ua_data.idl defining the
-  structure for custom UA values (brands, platform, architecture, etc.)
-- Added setUA() method to NavigatorUAData interface to accept override values
-- Implemented override storage using optional member variables in NavigatorUAData
-- Modified getHighEntropyValues(), brands(), mobile(), and platform() methods
-  to return override values when set, falling back to defaults
-- Fixed NavigatorUA to cache NavigatorUAData instance instead of creating new
-  instances on each access, ensuring overrides persist across calls
-- Made NavigatorUA inherit from GarbageCollectedMixin for proper memory management
-- Updated NavigatorBase::Trace() to call NavigatorUA::Trace() for proper GC
-- Added v8_ua_override_values.{cc,h} to generated_in_core.gni build config
-
-Usage example:
-  navigator.userAgentData.setUA({
-    brands: [{ brand: 'CustomBrowser', version: '1' }],
-    platform: 'Windows',
-    architecture: 'x86',
-    bitness: '64',
-    mobile: false
-  });
+- Added UAOverrideValues dictionary
+- Added setUA() method to NavigatorUAData
+- Modified methods to return overrides
+- Made NavigatorUA cache instance
+- Made NavigatorUA inherit from GarbageCollectedMixin
 
 diff --git a/third_party/blink/renderer/bindings/generated_in_core.gni b/third_party/blink/renderer/bindings/generated_in_core.gni
 index 3f330b6b357c8bfb915a6adc6c6ceed40d9d9d0a..8667d64863a8921e235562a47d48fe05a748722e 100644
