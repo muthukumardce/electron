@@ -1,0 +1,600 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Wed, 28 Jan 2026 20:54:15 +0530
+Subject: feat: Add navigator.userAgentData.setUA() method to override UA
+ Client Hints
+
+This commit implements a new navigator.userAgentData.setUA() method that
+allows customizing the values returned by getHighEntropyValues(), brands(),
+mobile(), and platform().
+
+Changes:
+- Added UAOverrideValues dictionary to navigator_ua_data.idl
+- Added setUA() method to NavigatorUAData interface
+- Implemented per-Agent-cluster override storage using UAOverrideManager
+- Thread-safe singleton for Service Worker support
+- Workers share Agent cluster with parent, so overrides propagate
+- Modified getHighEntropyValues/brands/mobile/platform to use overrides
+- Fixed NavigatorUA to cache NavigatorUAData instance
+- Made NavigatorUA inherit from GarbageCollectedMixin for proper GC
+- Updated NavigatorBase::Trace() to call NavigatorUA::Trace()
+- Added v8_ua_override_values.{cc,h} to generated_in_core.gni
+
+Note: This does NOT override navigator.userAgent string - only the
+User-Agent Client Hints API (navigator.userAgentData).
+
+diff --git a/third_party/blink/renderer/bindings/generated_in_core.gni b/third_party/blink/renderer/bindings/generated_in_core.gni
+index e6602c8869eee440a78295ba95d76962867fec4b..0d10c9f3be2b779c88e46f6ad7698fca30581177 100644
+--- a/third_party/blink/renderer/bindings/generated_in_core.gni
++++ b/third_party/blink/renderer/bindings/generated_in_core.gni
+@@ -504,6 +504,8 @@ generated_dictionary_sources_in_core = [
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_trusted_type_policy_options.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_ua_data_values.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_ua_data_values.h",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_ua_override_values.cc",
++  "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_ua_override_values.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_ui_event_init.cc",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_ui_event_init.h",
+   "$root_gen_dir/third_party/blink/renderer/bindings/core/v8/v8_underlying_source.cc",
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index 0910e68f91b9090655f054976e34bffc1dbdc549..bd55a1b554674b778aeb4e51fed8dec26bf2403c 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -77,6 +77,7 @@ void NavigatorBase::Trace(Visitor* visitor) const {
+   visitor->Trace(global_fetch_impl_);
+   ScriptWrappable::Trace(visitor);
+   NavigatorLanguage::Trace(visitor);
++  NavigatorUA::Trace(visitor);
+   ExecutionContextClient::Trace(visitor);
+   visitor->Trace(gpu_);
+   visitor->Trace(geolocation_);
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua.cc b/third_party/blink/renderer/core/frame/navigator_ua.cc
+index 6275dbfa196ca0211b89205289fa42d5cd348e3c..b4ff0369e8f704dfd2bf95a696d0aaee4fe903a3 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua.cc
+@@ -12,29 +12,39 @@
+ namespace blink {
+ 
+ NavigatorUAData* NavigatorUA::userAgentData() {
+-  NavigatorUAData* ua_data =
+-      MakeGarbageCollected<NavigatorUAData>(GetUAExecutionContext());
++  // Return cached instance if it exists
++  if (ua_data_) {
++    return ua_data_;
++  }
++
++  // Create and cache the NavigatorUAData instance
++  ua_data_ = MakeGarbageCollected<NavigatorUAData>(GetUAExecutionContext());
+ 
+   UserAgentMetadata metadata = GetUserAgentMetadata();
+-  ua_data->SetBrandVersionList(metadata.brand_version_list);
+-  ua_data->SetMobile(metadata.mobile);
+-  ua_data->SetPlatform(String::FromUTF8(metadata.platform),
++  ua_data_->SetBrandVersionList(metadata.brand_version_list);
++  ua_data_->SetMobile(metadata.mobile);
++  ua_data_->SetPlatform(String::FromUTF8(metadata.platform),
+                        String::FromUTF8(metadata.platform_version));
+-  ua_data->SetArchitecture(String::FromUTF8(metadata.architecture));
+-  ua_data->SetModel(String::FromUTF8(metadata.model));
+-  ua_data->SetUAFullVersion(String::FromUTF8(metadata.full_version));
+-  ua_data->SetBitness(String::FromUTF8(metadata.bitness));
+-  ua_data->SetFullVersionList(metadata.brand_full_version_list);
+-  ua_data->SetWoW64(metadata.wow64);
++  ua_data_->SetArchitecture(String::FromUTF8(metadata.architecture));
++  ua_data_->SetModel(String::FromUTF8(metadata.model));
++  ua_data_->SetUAFullVersion(String::FromUTF8(metadata.full_version));
++  ua_data_->SetBitness(String::FromUTF8(metadata.bitness));
++  ua_data_->SetFullVersionList(metadata.brand_full_version_list);
++  ua_data_->SetWoW64(metadata.wow64);
+   Vector<String> form_factors;
+   form_factors.reserve(
+       base::checked_cast<wtf_size_t>(metadata.form_factors.size()));
+   for (auto& ff : metadata.form_factors) {
+     form_factors.push_back(String::FromUTF8(ff));
+   }
+-  ua_data->SetFormFactors(std::move(form_factors));
++  ua_data_->SetFormFactors(std::move(form_factors));
++
++  return ua_data_;
++}
+ 
+-  return ua_data;
++void NavigatorUA::Trace(Visitor* visitor) const {
++  visitor->Trace(ua_data_);
++  GarbageCollectedMixin::Trace(visitor);
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua.h b/third_party/blink/renderer/core/frame/navigator_ua.h
+index 604e72460821222796abe2803db2d53eb4db8775..cbcc88326032455da808a68f19aff895eccb0dc5 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua.h
++++ b/third_party/blink/renderer/core/frame/navigator_ua.h
+@@ -8,17 +8,27 @@
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ #include "third_party/blink/renderer/core/core_export.h"
+ #include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
++#include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ namespace blink {
+ 
+-class CORE_EXPORT NavigatorUA {
++class CORE_EXPORT NavigatorUA : public GarbageCollectedMixin {
+  public:
+   NavigatorUAData* userAgentData();
+ 
++  void Trace(Visitor* visitor) const override;
++
+  protected:
+   virtual UserAgentMetadata GetUserAgentMetadata() const = 0;
+   virtual ExecutionContext* GetUAExecutionContext() const = 0;
++
++  // Record identifiability study metrics for NavigatorUAData if the user is in
++  // the study.
++  void MaybeRecordMetrics(const NavigatorUAData& ua_data);
++
++ private:
++  Member<NavigatorUAData> ua_data_;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index c1ed20c08e1d1bb14f3e9b062bcac9b55ec54868..a8c6a2fd37f8d8f13215844c95e00316763c2bf8 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -10,6 +10,8 @@
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_ua_data_values.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_ua_override_values.h"
++#include "third_party/blink/renderer/core/execution_context/agent.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/web_feature_forward.h"
+ #include "third_party/blink/renderer/core/page/page.h"
+@@ -17,6 +19,59 @@
+ 
+ namespace blink {
+ 
++// UAOverrideValues_Storage Reset implementation
++void UAOverrideValues_Storage::Reset() {
++  has_override = false;
++  override_brands.clear();
++  override_full_version_list.clear();
++  override_mobile.reset();
++  override_platform.reset();
++  override_platform_version.reset();
++  override_architecture.reset();
++  override_model.reset();
++  override_ua_full_version.reset();
++  override_bitness.reset();
++  override_wow64.reset();
++  override_form_factors.reset();
++}
++
++// UAOverrideManager singleton - thread-safe for Service Worker access
++UAOverrideManager& UAOverrideManager::GetInstance() {
++  DEFINE_THREAD_SAFE_STATIC_LOCAL(UAOverrideManager, instance, ());
++  return instance;
++}
++
++UAOverrideValues_Storage* UAOverrideManager::GetStorageForCluster(
++    const base::UnguessableToken& cluster_id) {
++  if (cluster_id.is_empty()) {
++    return nullptr;
++  }
++  base::AutoLock auto_lock(lock_);
++  String key = String::FromUTF8(cluster_id.ToString());
++  auto it = storage_map_.find(key);
++  if (it != storage_map_.end()) {
++    return it->value.get();
++  }
++  // Create new storage for this agent cluster
++  auto storage = std::make_unique<UAOverrideValues_Storage>();
++  UAOverrideValues_Storage* ptr = storage.get();
++  storage_map_.insert(key, std::move(storage));
++  return ptr;
++}
++
++void UAOverrideManager::ResetStorageForCluster(
++    const base::UnguessableToken& cluster_id) {
++  if (cluster_id.is_empty()) {
++    return;
++  }
++  base::AutoLock auto_lock(lock_);
++  String key = String::FromUTF8(cluster_id.ToString());
++  auto it = storage_map_.find(key);
++  if (it != storage_map_.end()) {
++    it->value->Reset();
++  }
++}
++
+ NavigatorUAData::NavigatorUAData(ExecutionContext* context)
+     : ExecutionContextClient(context) {
+   NavigatorUABrandVersion* dict = NavigatorUABrandVersion::Create();
+@@ -90,8 +145,136 @@ void NavigatorUAData::SetFormFactors(Vector<String> form_factors) {
+   form_factors_ = std::move(form_factors);
+ }
+ 
++base::UnguessableToken NavigatorUAData::GetAgentClusterId() const {
++  ExecutionContext* context = GetExecutionContext();
++  if (!context) {
++    return base::UnguessableToken();
++  }
++  return context->GetAgentClusterID();
++}
++
++void NavigatorUAData::setUA(const UAOverrideValues* override_values) {
++  base::UnguessableToken cluster_id = GetAgentClusterId();
++  if (cluster_id.is_empty()) {
++    return;
++  }
++
++  UAOverrideValues_Storage* storage =
++      UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
++  if (!storage) {
++    return;
++  }
++
++  if (!override_values) {
++    storage->Reset();
++    return;
++  }
++
++  storage->has_override = true;
++
++  // Override brands - store as pairs of strings
++  if (override_values->hasBrands()) {
++    storage->override_brands.clear();
++    for (const auto& brand : override_values->brands()) {
++      storage->override_brands.push_back(
++          std::make_pair(brand->brand(), brand->version()));
++    }
++  }
++
++  // Override fullVersionList - store as pairs of strings
++  if (override_values->hasFullVersionList()) {
++    storage->override_full_version_list.clear();
++    for (const auto& brand : override_values->fullVersionList()) {
++      storage->override_full_version_list.push_back(
++          std::make_pair(brand->brand(), brand->version()));
++    }
++  }
++
++  // Override mobile
++  if (override_values->hasMobile()) {
++    storage->override_mobile = override_values->mobile();
++  }
++
++  // Override platform
++  if (override_values->hasPlatform()) {
++    storage->override_platform = override_values->platform();
++  }
++
++  // Override platformVersion
++  if (override_values->hasPlatformVersion()) {
++    storage->override_platform_version = override_values->platformVersion();
++  }
++
++  // Override architecture
++  if (override_values->hasArchitecture()) {
++    storage->override_architecture = override_values->architecture();
++  }
++
++  // Override model
++  if (override_values->hasModel()) {
++    storage->override_model = override_values->model();
++  }
++
++  // Override uaFullVersion
++  if (override_values->hasUaFullVersion()) {
++    storage->override_ua_full_version = override_values->uaFullVersion();
++  }
++
++  // Override bitness
++  if (override_values->hasBitness()) {
++    storage->override_bitness = override_values->bitness();
++  }
++
++  // Override wow64
++  if (override_values->hasWow64()) {
++    storage->override_wow64 = override_values->wow64();
++  }
++
++  // Override formFactors
++  if (override_values->hasFormFactors()) {
++    storage->override_form_factors = override_values->formFactors();
++  }
++}
++
++HeapVector<Member<NavigatorUABrandVersion>> NavigatorUAData::BuildOverrideBrands(
++    const UAOverrideValues_Storage* storage) const {
++  HeapVector<Member<NavigatorUABrandVersion>> result;
++  if (!storage) {
++    return result;
++  }
++  for (const auto& pair : storage->override_brands) {
++    NavigatorUABrandVersion* dict = NavigatorUABrandVersion::Create();
++    dict->setBrand(pair.first);
++    dict->setVersion(pair.second);
++    result.push_back(dict);
++  }
++  return result;
++}
++
++HeapVector<Member<NavigatorUABrandVersion>> NavigatorUAData::BuildOverrideFullVersionList(
++    const UAOverrideValues_Storage* storage) const {
++  HeapVector<Member<NavigatorUABrandVersion>> result;
++  if (!storage) {
++    return result;
++  }
++  for (const auto& pair : storage->override_full_version_list) {
++    NavigatorUABrandVersion* dict = NavigatorUABrandVersion::Create();
++    dict->setBrand(pair.first);
++    dict->setVersion(pair.second);
++    result.push_back(dict);
++  }
++  return result;
++}
++
+ bool NavigatorUAData::mobile() const {
+   if (GetExecutionContext()) {
++    base::UnguessableToken cluster_id = GetExecutionContext()->GetAgentClusterID();
++    UAOverrideValues_Storage* storage =
++        UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
++    // Return override if set
++    if (storage && storage->has_override && storage->override_mobile.has_value()) {
++      return storage->override_mobile.value();
++    }
+     return is_mobile_;
+   }
+   return false;
+@@ -100,6 +283,23 @@ bool NavigatorUAData::mobile() const {
+ const HeapVector<Member<NavigatorUABrandVersion>>& NavigatorUAData::brands()
+     const {
+   if (GetExecutionContext()) {
++    base::UnguessableToken cluster_id = GetExecutionContext()->GetAgentClusterID();
++    UAOverrideValues_Storage* storage =
++        UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
++    // Return override brands if set - note: we need to cache this to return a reference
++    if (storage && storage->has_override && !storage->override_brands.empty()) {
++      // We need to build and cache override brands
++      // For thread safety with reference return, store in thread-local
++      thread_local HeapVector<Member<NavigatorUABrandVersion>> cached_override_brands;
++      cached_override_brands.clear();
++      for (const auto& pair : storage->override_brands) {
++        NavigatorUABrandVersion* dict = NavigatorUABrandVersion::Create();
++        dict->setBrand(pair.first);
++        dict->setVersion(pair.second);
++        cached_override_brands.push_back(dict);
++      }
++      return cached_override_brands;
++    }
+     return brand_set_;
+   }
+ 
+@@ -108,6 +308,13 @@ const HeapVector<Member<NavigatorUABrandVersion>>& NavigatorUAData::brands()
+ 
+ const String& NavigatorUAData::platform() const {
+   if (GetExecutionContext()) {
++    base::UnguessableToken cluster_id = GetExecutionContext()->GetAgentClusterID();
++    UAOverrideValues_Storage* storage =
++        UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
++    // Return override if set
++    if (storage && storage->has_override && storage->override_platform.has_value()) {
++      return storage->override_platform.value();
++    }
+     return platform_;
+   }
+   return g_empty_string;
+@@ -156,30 +363,73 @@ ScriptPromise<UADataValues> NavigatorUAData::getHighEntropyValues(
+   // low-entropy brands, mobile and platform hints should always be included for
+   // convenience.
+ 
+-  values->setBrands(brand_set_);
+-  values->setMobile(is_mobile_);
+-  values->setPlatform(platform_);
++  // Use `brands()` and not `brand_set_` directly since the former also
++  // returns override values when set.
++  values->setBrands(brands());
++
++  // Get the per-agent-cluster override storage
++  base::UnguessableToken cluster_id = execution_context->GetAgentClusterID();
++  UAOverrideValues_Storage* storage =
++      UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
++
++  // Use override mobile if set, otherwise use default
++  bool mobile_value = (storage && storage->has_override && storage->override_mobile.has_value())
++                          ? storage->override_mobile.value()
++                          : is_mobile_;
++  values->setMobile(mobile_value);
++
++  // Use override platform if set, otherwise use default
++  String platform_value = (storage && storage->has_override && storage->override_platform.has_value())
++                              ? storage->override_platform.value()
++                              : platform_;
++  values->setPlatform(platform_value);
+ 
+   // If the "ch-ua-high-entropy-values" permission policy is enabled for a
+   // document, add high-entropy client hints to values (if requested)
+   if (AllowedToCollectHighEntropyValues(execution_context)) {
+     for (const String& hint : hints) {
+       if (hint == "platformVersion") {
+-        values->setPlatformVersion(platform_version_);
++        String value = (storage && storage->has_override && storage->override_platform_version.has_value())
++                           ? storage->override_platform_version.value()
++                           : platform_version_;
++        values->setPlatformVersion(value);
+       } else if (hint == "architecture") {
+-        values->setArchitecture(architecture_);
++        String value = (storage && storage->has_override && storage->override_architecture.has_value())
++                           ? storage->override_architecture.value()
++                           : architecture_;
++        values->setArchitecture(value);
+       } else if (hint == "model") {
+-        values->setModel(model_);
++        String value = (storage && storage->has_override && storage->override_model.has_value())
++                           ? storage->override_model.value()
++                           : model_;
++        values->setModel(value);
+       } else if (hint == "uaFullVersion") {
+-        values->setUaFullVersion(ua_full_version_);
++        String value = (storage && storage->has_override && storage->override_ua_full_version.has_value())
++                           ? storage->override_ua_full_version.value()
++                           : ua_full_version_;
++        values->setUaFullVersion(value);
+       } else if (hint == "bitness") {
+-        values->setBitness(bitness_);
++        String value = (storage && storage->has_override && storage->override_bitness.has_value())
++                           ? storage->override_bitness.value()
++                           : bitness_;
++        values->setBitness(value);
+       } else if (hint == "fullVersionList") {
+-        values->setFullVersionList(full_version_list_);
++        // Use override fullVersionList if set
++        if (storage && storage->has_override && !storage->override_full_version_list.empty()) {
++          values->setFullVersionList(BuildOverrideFullVersionList(storage));
++        } else {
++          values->setFullVersionList(full_version_list_);
++        }
+       } else if (hint == "wow64") {
+-        values->setWow64(is_wow64_);
++        bool value = (storage && storage->has_override && storage->override_wow64.has_value())
++                         ? storage->override_wow64.value()
++                         : is_wow64_;
++        values->setWow64(value);
+       } else if (hint == "formFactors") {
+-        values->setFormFactors(form_factors_);
++        Vector<String> value = (storage && storage->has_override && storage->override_form_factors.has_value())
++                                   ? storage->override_form_factors.value()
++                                   : form_factors_;
++        values->setFormFactors(value);
+       }
+     }
+   }
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.h b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+index 101c7334645e053d892893d7552650464b6fbf6c..1ea8f988cf363de59ca8fbebda0ce290571eb984 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.h
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+@@ -5,19 +5,63 @@
+ #ifndef THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_NAVIGATOR_UA_DATA_H_
+ #define THIRD_PARTY_BLINK_RENDERER_CORE_FRAME_NAVIGATOR_UA_DATA_H_
+ 
++#include "base/synchronization/lock.h"
++#include "base/unguessable_token.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_navigator_ua_brand_version.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context_lifecycle_observer.h"
+ #include "third_party/blink/renderer/platform/bindings/script_wrappable.h"
++#include "third_party/blink/renderer/platform/wtf/hash_map.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ namespace blink {
+ 
++class Agent;
+ class NavigatorUABrandVersion;
+ class ScriptState;
+ class UADataValues;
++class UAOverrideValues;
++
++// UA override values storage - one instance per Agent cluster (session-scoped)
++// Workers share the same Agent cluster as their parent document, so overrides
++// set in the main window will also apply to its workers.
++struct UAOverrideValues_Storage {
++  bool has_override = false;
++  Vector<std::pair<String, String>> override_brands;
++  Vector<std::pair<String, String>> override_full_version_list;
++  std::optional<bool> override_mobile;
++  std::optional<String> override_platform;
++  std::optional<String> override_platform_version;
++  std::optional<String> override_architecture;
++  std::optional<String> override_model;
++  std::optional<String> override_ua_full_version;
++  std::optional<String> override_bitness;
++  std::optional<bool> override_wow64;
++  std::optional<Vector<String>> override_form_factors;
++
++  void Reset();
++};
++
++// Manager for per-Agent-cluster UA override storage
++// Uses the Agent's cluster_id string representation as key
++class CORE_EXPORT UAOverrideManager {
++ public:
++  static UAOverrideManager& GetInstance();
++
++  UAOverrideValues_Storage* GetStorageForCluster(const base::UnguessableToken& cluster_id);
++  void ResetStorageForCluster(const base::UnguessableToken& cluster_id);
++
++ private:
++  UAOverrideManager() = default;
++
++  // Mutex for thread-safe access (Service Workers run on different threads)
++  base::Lock lock_;
++
++  // Map from Agent cluster_id (as string) to its UA override storage
++  HashMap<String, std::unique_ptr<UAOverrideValues_Storage>> storage_map_ GUARDED_BY(lock_);
++};
+ 
+ class NavigatorUAData : public ScriptWrappable, ExecutionContextClient {
+   DEFINE_WRAPPERTYPEINFO();
+@@ -48,6 +92,9 @@ class NavigatorUAData : public ScriptWrappable, ExecutionContextClient {
+                                                    const Vector<String>&) const;
+   ScriptObject toJSON(ScriptState*) const;
+ 
++  // Custom UA override method
++  void setUA(const UAOverrideValues* override_values);
++
+   void Trace(Visitor* visitor) const final;
+ 
+  private:
+@@ -66,6 +113,15 @@ class NavigatorUAData : public ScriptWrappable, ExecutionContextClient {
+ 
+   void AddBrandVersion(const String& brand, const String& version);
+   void AddBrandFullVersion(const String& brand, const String& version);
++
++  // Helper to get the Agent cluster ID for this context
++  base::UnguessableToken GetAgentClusterId() const;
++
++  // Helper to build brand version list from per-agent override storage
++  HeapVector<Member<NavigatorUABrandVersion>> BuildOverrideBrands(
++      const UAOverrideValues_Storage* storage) const;
++  HeapVector<Member<NavigatorUABrandVersion>> BuildOverrideFullVersionList(
++      const UAOverrideValues_Storage* storage) const;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.idl b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+index 5edd01e17a7ca4e10a170097274fd060d6303388..ac83b23a9dcc3e557e91ac78146051bb2eab33b2 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.idl
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+@@ -4,10 +4,28 @@
+ 
+ // https://github.com/WICG/ua-client-hints
+ 
++// Custom UA override values for setUA()
++dictionary UAOverrideValues {
++  sequence<NavigatorUABrandVersion> brands;
++  boolean mobile;
++  DOMString platform;
++  DOMString platformVersion;
++  DOMString architecture;
++  DOMString model;
++  DOMString uaFullVersion;
++  DOMString bitness;
++  sequence<NavigatorUABrandVersion> fullVersionList;
++  boolean wow64;
++  sequence<DOMString> formFactors;
++};
++
+ [Exposed=(Window,Worker)] interface NavigatorUAData {
+   [MeasureAs=NavigatorUAData_Brands] readonly attribute FrozenArray<NavigatorUABrandVersion> brands;
+   [MeasureAs=NavigatorUAData_Mobile]  readonly attribute boolean mobile;
+   [MeasureAs=NavigatorUAData_Platform] readonly attribute DOMString platform;
+   [CallWith=ScriptState, MeasureAs=NavigatorUAData_GetHighEntropyValues] Promise<UADataValues> getHighEntropyValues(sequence<DOMString> hints);
+   [CallWith=ScriptState, MeasureAs=NavigatorUAData_toJSON] object toJSON();
++
++  // Custom method to override UA values
++  void setUA(UAOverrideValues overrideValues);
+ };

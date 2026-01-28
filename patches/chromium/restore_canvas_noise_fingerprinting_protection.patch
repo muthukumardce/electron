@@ -1,0 +1,672 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Wed, 28 Jan 2026 00:13:08 +0530
+Subject: Restore canvas noise fingerprinting protection
+
+Restores the canvas noise feature that was removed from Chromium to
+provide per-site, per-session deterministic fingerprinting protection.
+
+Implementation:
+- Browser side: Generates random session token per BrowserContext and
+  derives per-origin tokens using SHA-256 + FNV-1a hashing
+- Token flow: NavigationRequest -> RenderFrameHost -> WebViewImpl ->
+  Page -> ExecutionContext via mojo IPC
+- Renderer side: Applies deterministic noise to canvas readback
+  operations (toDataURL, toBlob) using FNV-1a based pixel perturbation
+- Always enabled: ContentBrowserClient::ShouldEnableCanvasNoise()
+  returns true by default
+
+Key files:
+- content/browser/fingerprinting_protection/canvas_noise_token_data.*:
+  Browser-side token generation and management
+- third_party/blink/renderer/core/canvas_interventions/
+  canvas_interventions_helper.*: Renderer-side noising logic
+- Mojo interface: page.mojom UpdateCanvasNoiseToken() for IPC
+
+diff --git a/content/browser/BUILD.gn b/content/browser/BUILD.gn
+index 8d3c63e9c4da3fa0a804a62891c8da608a572165..4a3644fd43d62b0a5d60aec14ab52102af0d8069 100644
+--- a/content/browser/BUILD.gn
++++ b/content/browser/BUILD.gn
+@@ -1052,6 +1052,8 @@ source_set("browser") {
+     "fenced_frame/fenced_frame_url_mapping.h",
+     "fenced_frame/fenced_frame_viewport_observer.cc",
+     "fenced_frame/fenced_frame_viewport_observer.h",
++    "fingerprinting_protection/canvas_noise_token_data.cc",
++    "fingerprinting_protection/canvas_noise_token_data.h",
+     "field_trial_recorder.cc",
+     "field_trial_recorder.h",
+     "field_trial_synchronizer.cc",
+diff --git a/content/browser/fingerprinting_protection/DEPS b/content/browser/fingerprinting_protection/DEPS
+new file mode 100644
+index 0000000000000000000000000000000000000000..3cf205b955fc7fc7419173e1dd59894711a4a0b7
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/DEPS
+@@ -0,0 +1,5 @@
++include_rules = [
++  "+crypto",
++  "+net/base",
++  "+third_party/blink/public/common/fingerprinting_protection",
++];
+diff --git a/content/browser/fingerprinting_protection/OWNERS b/content/browser/fingerprinting_protection/OWNERS
+new file mode 100644
+index 0000000000000000000000000000000000000000..f60e2ffdadd2fd290578062309a560d9ebfe767c
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/OWNERS
+@@ -0,0 +1 @@
++file://content/browser/OWNERS
+diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.cc b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..8c5a1806c96a5b52c3f76d33cb8f6bb2363b2744
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.cc
+@@ -0,0 +1,81 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "content/browser/fingerprinting_protection/canvas_noise_token_data.h"
++
++#include <cstdint>
++#include <memory>
++#include <string_view>
++
++#include "base/containers/span.h"
++#include "base/hash/hash.h"
++#include "base/numerics/byte_conversions.h"
++#include "base/strings/strcat.h"
++#include "base/strings/string_number_conversions.h"
++#include "base/supports_user_data.h"
++#include "base/types/pass_key.h"
++#include "base/unguessable_token.h"
++#include "content/public/browser/browser_context.h"
++#include "crypto/hash.h"
++#include "net/base/network_anonymization_key.h"
++#include "net/base/schemeful_site.h"
++#include "url/origin.h"
++#include "url/scheme_host_port.h"
++
++namespace content {
++
++namespace {
++const void* const kBrowserContextCanvasNoiseTokenKey =
++    &kBrowserContextCanvasNoiseTokenKey;
++
++// FNV constants
++// https://datatracker.ietf.org/doc/html/draft-eastlake-fnv#name-fnv-constants
++constexpr uint64_t kFnvPrime = 0x00000100000001b3;
++constexpr uint64_t kFnvOffset = 0xcbf29ce484222325;
++
++blink::NoiseToken DeriveInitialNoiseHash(blink::NoiseToken token,
++                                         std::string_view domain) {
++  uint64_t token_hash = kFnvOffset;
++  crypto::hash::Hasher hasher(crypto::hash::kSha256);
++  hasher.Update(base::U64ToLittleEndian(token.Value()));
++  hasher.Update(base::as_byte_span(domain));
++  std::array<uint8_t, crypto::hash::kSha256Size> digest;
++  hasher.Finish(digest);
++  token_hash ^= base::U64FromLittleEndian(base::span(digest).first<8>());
++  token_hash *= kFnvPrime;
++  return blink::NoiseToken(token_hash);
++}
++}  // namespace
++
++// static
++blink::NoiseToken CanvasNoiseTokenData::GetBrowserToken(
++    BrowserContext* context) {
++  CanvasNoiseTokenData* data = static_cast<CanvasNoiseTokenData*>(
++      context->GetUserData(&kBrowserContextCanvasNoiseTokenKey));
++  if (data != nullptr) {
++    return data->session_token_;
++  }
++  return CanvasNoiseTokenData::SetNewToken(context);
++}
++
++// static
++blink::NoiseToken CanvasNoiseTokenData::GetToken(BrowserContext* context,
++                                                  const url::Origin& origin) {
++  if (!origin.opaque()) {
++    return DeriveInitialNoiseHash(GetBrowserToken(context), origin.Serialize());
++  }
++  return DeriveInitialNoiseHash(GetBrowserToken(context),
++                                base::UnguessableToken::Create().ToString());
++}
++
++// static
++blink::NoiseToken CanvasNoiseTokenData::SetNewToken(BrowserContext* context) {
++  auto new_data = std::make_unique<CanvasNoiseTokenData>();
++  blink::NoiseToken token = new_data->session_token_;
++  context->SetUserData(&kBrowserContextCanvasNoiseTokenKey,
++                       std::move(new_data));
++  return token;
++}
++
++}  // namespace content
+diff --git a/content/browser/fingerprinting_protection/canvas_noise_token_data.h b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..64214135635aea1b42270e19dd7771c78cc48994
+--- /dev/null
++++ b/content/browser/fingerprinting_protection/canvas_noise_token_data.h
+@@ -0,0 +1,45 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CONTENT_BROWSER_FINGERPRINTING_PROTECTION_CANVAS_NOISE_TOKEN_DATA_H_
++#define CONTENT_BROWSER_FINGERPRINTING_PROTECTION_CANVAS_NOISE_TOKEN_DATA_H_
++
++#include <cstdint>
++
++#include "base/rand_util.h"
++#include "content/common/content_export.h"
++#include "content/public/browser/browser_context.h"
++#include "third_party/blink/public/common/fingerprinting_protection/noise_token.h"
++#include "url/origin.h"
++
++namespace content {
++
++// A user data class that generates and stores BrowserContext-associated noise
++// tokens used for canvas noising. Each BrowserContext gets a unique random
++// session token on creation, and per-origin tokens are derived from it.
++class CONTENT_EXPORT CanvasNoiseTokenData
++    : public base::SupportsUserData::Data {
++ public:
++  CanvasNoiseTokenData() = default;
++
++  // Gets the 64 bit BrowserContext-associated noise token computed with the
++  // main frame's |origin|. If the origin is opaque, a random value will be
++  // used.
++  static blink::NoiseToken GetToken(BrowserContext* context,
++                                    const url::Origin& origin);
++
++  // Regenerates the noise token, returning the updated token value.
++  static blink::NoiseToken SetNewToken(BrowserContext* context);
++
++ private:
++  // Helper to generate the 64 bit BrowserContext-associated token, which will
++  // be different per BrowserContext.
++  static blink::NoiseToken GetBrowserToken(BrowserContext* context);
++
++  blink::NoiseToken session_token_{base::RandUint64()};
++};
++
++}  // namespace content
++
++#endif  // CONTENT_BROWSER_FINGERPRINTING_PROTECTION_CANVAS_NOISE_TOKEN_DATA_H_
+diff --git a/content/browser/renderer_host/navigation_request.cc b/content/browser/renderer_host/navigation_request.cc
+index 93e702df43d4c576443cd3efbf9127db2a00693e..0a9faf98921c44d2b9e4d9715c97f56a8f758ec7 100644
+--- a/content/browser/renderer_host/navigation_request.cc
++++ b/content/browser/renderer_host/navigation_request.cc
+@@ -55,6 +55,7 @@
+ #include "content/browser/devtools/network_service_devtools_observer.h"
+ #include "content/browser/download/download_manager_impl.h"
+ #include "content/browser/fenced_frame/fenced_frame_url_mapping.h"
++#include "content/browser/fingerprinting_protection/canvas_noise_token_data.h"
+ #include "content/browser/interest_group/ad_auction_headers_util.h"
+ #include "content/browser/loader/browser_initiated_resource_request.h"
+ #include "content/browser/loader/cached_navigation_url_loader.h"
+@@ -8762,6 +8763,20 @@ void NavigationRequest::ReadyToCommitNavigation(bool is_error) {
+   same_origin_ = (previous_render_frame_host->GetLastCommittedOrigin() ==
+                   origin_to_commit);
+ 
++  // Generate canvas noise token for main frames. The token is based on the
++  // origin and BrowserContext session token to provide per-site, per-session
++  // deterministic noise. This must be done here when the origin is available.
++  if (IsInMainFrame() && origin_to_commit.has_value()) {
++    BrowserContext* browser_context =
++        frame_tree_node()->navigator().controller().GetBrowserContext();
++    if (GetContentClient()->browser()->ShouldEnableCanvasNoise(
++            browser_context, origin_to_commit->GetURL())) {
++      canvas_noise_token_ =
++          CanvasNoiseTokenData::GetToken(browser_context,
++                                        origin_to_commit.value()).Value();
++    }
++  }
++
+   SetExpectedProcess(GetRenderFrameHost()->GetProcess());
+ 
+   commit_params_->is_load_data_with_base_url = IsLoadDataWithBaseURL();
+diff --git a/content/browser/renderer_host/navigation_request.h b/content/browser/renderer_host/navigation_request.h
+index ba3959a35fa4ba9b23094cd86f7adc04a738a3d1..d70360f8ff7707af0b357fe303446ae83df56ee0 100644
+--- a/content/browser/renderer_host/navigation_request.h
++++ b/content/browser/renderer_host/navigation_request.h
+@@ -503,6 +503,11 @@ class CONTENT_EXPORT NavigationRequest
+   bool IsInitialWebUISyncNavigation() override;
+   // End of NavigationHandle implementation.
+ 
++  // Returns the canvas noise token for this navigation, if available.
++  std::optional<uint64_t> canvas_noise_token() const {
++    return canvas_noise_token_;
++  }
++
+   // mojom::NavigationRendererCancellationListener implementation:
+   void RendererCancellationWindowEnded() override;
+   // End of mojom::NavigationRendererCancellationListener implementation.
+@@ -3404,6 +3409,11 @@ class CONTENT_EXPORT NavigationRequest
+   // cross-document navigations.
+   std::optional<base::UnguessableToken> network_restrictions_id_;
+ 
++  // The canvas noise token for this navigation. Generated during
++  // ReadyToCommitNavigation for main frames based on the origin and
++  // BrowserContext session token.
++  std::optional<uint64_t> canvas_noise_token_;
++
+   base::WeakPtrFactory<NavigationRequest> weak_factory_{this};
+ };
+ 
+diff --git a/content/browser/renderer_host/page_impl.h b/content/browser/renderer_host/page_impl.h
+index 75062bb8156e56d10ecd5ff13b66196632bbd5bb..1b3f88db5df4c7faf089a0d5672f6d9943999f75 100644
+--- a/content/browser/renderer_host/page_impl.h
++++ b/content/browser/renderer_host/page_impl.h
+@@ -84,6 +84,19 @@ class CONTENT_EXPORT PageImpl : public Page {
+   // Setter for the `window.setResizable(bool)` API's value defining whether the
+   // window can be resized or not. `std::nullopt` means the value is not set.
+   void SetResizable(std::optional<bool> resizable);
++
++  std::optional<uint64_t> canvas_noise_token() const {
++    return canvas_noise_token_.has_value()
++               ? std::optional<uint64_t>(canvas_noise_token_->Value())
++               : std::nullopt;
++  }
++  void set_canvas_noise_token(std::optional<uint64_t> token) {
++    canvas_noise_token_ = token.has_value()
++                              ? std::optional<blink::NoiseToken>(
++                                    blink::NoiseToken(*token))
++                              : std::nullopt;
++  }
++
+   base::WeakPtr<PageImpl> GetWeakPtrImpl();
+ 
+   virtual void UpdateManifestUrl(const GURL& manifest_url);
+diff --git a/content/browser/renderer_host/render_frame_host_impl.cc b/content/browser/renderer_host/render_frame_host_impl.cc
+index 55d1609ba46abe9433d22a894fc2b498735ff778..74bf547020e6a7e670aaf4e30914ccb3ff04e1ae 100644
+--- a/content/browser/renderer_host/render_frame_host_impl.cc
++++ b/content/browser/renderer_host/render_frame_host_impl.cc
+@@ -12406,6 +12406,22 @@ void RenderFrameHostImpl::CommitNavigation(
+               GetSiteInstance()->GetSiteInfo().is_sandboxed());
+   }
+ 
++  // Update canvas noise token for main frames. This ensures the blink::Page
++  // is set with the correct canvas noise token for fingerprinting protection.
++  // The token must be sent here at CommitNavigation time when the origin is
++  // available. For main frames, broadcast to all views; for subframes, the
++  // token will be inherited from the main frame's page.
++  if (is_main_frame()) {
++    std::optional<uint64_t> canvas_noise_token =
++        navigation_request->canvas_noise_token();
++    frame_tree()->root()->render_manager()->ExecutePageBroadcastMethod(
++        [canvas_noise_token](RenderViewHostImpl* rvh) {
++          if (auto& broadcast = rvh->GetAssociatedPageBroadcast()) {
++            broadcast->UpdateCanvasNoiseToken(canvas_noise_token);
++          }
++        });
++  }
++
+   // TODO(crbug.com/40092527): Compute the Origin to commit here.
+ 
+   // If this is an attempt to commit a URL in an incompatible process, capture a
+@@ -16186,6 +16202,12 @@ void RenderFrameHostImpl::TakeNewDocumentPropertiesFromNavigation(
+   renderer_url_info_.was_loaded_from_load_data_with_base_url =
+       navigation_request->IsLoadDataWithBaseURL();
+ 
++  // Store the canvas noise token on the Page. This token will be inherited by
++  // subframes for consistent per-site canvas noising.
++  // TODO(crbug.com/434006731): Assign this state earlier once RenderDocument
++  // ships and content::Page doesn't need to swap.
++  GetPage().set_canvas_noise_token(navigation_request->canvas_noise_token());
++
+   // Transfer ownership of PeakGpuMemoryTracker to Page. It will eventually be
+   // destroyed after the page finishes loading.
+   if (IsInPrimaryMainFrame()) {
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index 70d457e79bd07d691e4a827f333120737de76f14..e84545f233f303fabdfb93ff9c574346eaf09e11 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -311,6 +311,12 @@ bool ContentBrowserClient::ShouldStayInParentProcessForNTP(
+   return false;
+ }
+ 
++bool ContentBrowserClient::ShouldEnableCanvasNoise(
++    BrowserContext* browser_context,
++    const GURL& url) {
++  return true;  // Enabled by default for privacy protection.
++}
++
+ bool ContentBrowserClient::IsSuitableHost(RenderProcessHost* process_host,
+                                           const GURL& site_url) {
+   return true;
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 8708c76b75283e9b517124110fd29653526a4d14..5af0296e360be0a5a13a10b2aba16af9b4313c22 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -673,6 +673,12 @@ class CONTENT_EXPORT ContentBrowserClient {
+   virtual bool ShouldStayInParentProcessForNTP(const GURL& url,
+                                                const GURL& parent_site_url);
+ 
++  // Returns whether canvas noise should be enabled for the given URL.
++  // Canvas noise adds small deterministic perturbations to canvas readback
++  // operations to prevent fingerprinting while preserving functionality.
++  virtual bool ShouldEnableCanvasNoise(BrowserContext* browser_context,
++                                       const GURL& url);
++
+   // Returns whether a new view for a given |site_url| can be launched in a
+   // given |process_host|.
+   virtual bool IsSuitableHost(RenderProcessHost* process_host,
+diff --git a/third_party/blink/public/mojom/page/page.mojom b/third_party/blink/public/mojom/page/page.mojom
+index 114c3a4522d11c1348f681af500c487ccd97eea9..b9ee9cfd35565fd75c41ed12997a976c7db94926 100644
+--- a/third_party/blink/public/mojom/page/page.mojom
++++ b/third_party/blink/public/mojom/page/page.mojom
+@@ -183,4 +183,9 @@ interface PageBroadcast {
+ 
+   // Whether to enable the Renderer scheduler background throttling.
+   SetSchedulerThrottling(bool allowed);
++
++  // Updates the canvas noise token for fingerprinting protection. The token
++  // is used to add deterministic noise to canvas readback operations.
++  // nullopt disables canvas noise for this page.
++  UpdateCanvasNoiseToken(uint64? token);
+ };
+diff --git a/third_party/blink/renderer/core/canvas_interventions/build.gni b/third_party/blink/renderer/core/canvas_interventions/build.gni
+index 799b6b7135d2052cbca2d3f5b964ef3f0e152db2..62f188a86c43e0fc2b98c62d6103c962b3554619 100644
+--- a/third_party/blink/renderer/core/canvas_interventions/build.gni
++++ b/third_party/blink/renderer/core/canvas_interventions/build.gni
+@@ -3,6 +3,8 @@
+ # found in the LICENSE file.
+ 
+ blink_core_sources_canvas_interventions = [
++  "canvas_interventions_helper.cc",
++  "canvas_interventions_helper.h",
+   "noise_hash.cc",
+   "noise_hash.h",
+   "noise_helper.cc",
+diff --git a/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
+new file mode 100644
+index 0000000000000000000000000000000000000000..81ed8a5b42d52d952d845ea4ea4990291806c30c
+--- /dev/null
++++ b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
+@@ -0,0 +1,143 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.h"
++
++#include <cstdint>
++
++#include "base/containers/span.h"
++#include "base/memory/scoped_refptr.h"
++#include "base/metrics/histogram_functions.h"
++#include "base/metrics/histogram_macros.h"
++#include "base/notreached.h"
++#include "base/strings/strcat.h"
++#include "base/time/time.h"
++#include "third_party/blink/renderer/core/canvas_interventions/noise_hash.h"
++#include "third_party/blink/renderer/core/canvas_interventions/noise_helper.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/frame/frame.h"
++#include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/frame/web_feature.h"
++#include "third_party/blink/renderer/core/workers/worker_global_scope.h"
++#include "third_party/blink/renderer/platform/graphics/canvas_high_entropy_op_type.h"
++#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
++#include "third_party/blink/renderer/platform/runtime_feature_state/runtime_feature_state_override_context.h"
++#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
++#include "third_party/blink/renderer/platform/wtf/casting.h"
++#include "third_party/blink/renderer/platform/wtf/hash_traits.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkImageInfo.h"
++#include "ui/gfx/skia_span_util.h"
++
++namespace blink {
++
++namespace {
++
++constexpr const char kCanvasOperationMetricPrefix[] =
++    "FingerprintingProtection.CanvasNoise.OperationTriggered.";
++
++std::string_view GetContextTypeForMetrics(ExecutionContext* execution_context) {
++  if (execution_context->IsWindow()) {
++    return "Window";
++  }
++  if (execution_context->IsDedicatedWorkerGlobalScope()) {
++    return "DedicatedWorker";
++  }
++  if (execution_context->IsSharedWorkerGlobalScope()) {
++    return "SharedWorker";
++  }
++  if (execution_context->IsServiceWorkerGlobalScope()) {
++    return "ServiceWorker";
++  }
++  return "Other";
++}
++
++// Returns true when all criteria to apply noising are met.
++bool ShouldApplyNoise(HighEntropyCanvasOpType canvas_operations,
++                      ExecutionContext* execution_context) {
++  if (canvas_operations == HighEntropyCanvasOpType::kNone) {
++    return false;
++  }
++  if (!execution_context) {
++    return false;
++  }
++  if (!execution_context->CanvasNoiseToken().has_value()) {
++    return false;
++  }
++
++  UseCounter::Count(execution_context,
++                    WebFeature::kCanvasReadbackNoiseMatchesHeuristics);
++
++  return true;
++}
++}  // namespace
++
++// static
++bool CanvasInterventionsHelper::MaybeNoiseSnapshot(
++    ExecutionContext* execution_context,
++    scoped_refptr<StaticBitmapImage>& snapshot) {
++  base::TimeTicks start_time = base::TimeTicks::Now();
++  CHECK(snapshot);
++
++  HighEntropyCanvasOpType high_entropy_canvas_op_types =
++      snapshot->HighEntropyCanvasOpTypes();
++  if (!ShouldApplyNoise(high_entropy_canvas_op_types, execution_context)) {
++    return false;
++  }
++
++  // Use kUnpremul_SkAlphaType as alpha type as we are changing the pixel values
++  // of all channels, including the alpha channel.
++  auto info = SkImageInfo::Make(
++      snapshot->GetSize().width(), snapshot->GetSize().height(),
++      viz::ToClosestSkColorType(snapshot->GetSharedImageFormat()),
++      kUnpremul_SkAlphaType, snapshot->GetColorSpace().ToSkColorSpace());
++  SkBitmap bm;
++  if (!bm.tryAllocPixels(info)) {
++    return false;
++  }
++
++  // Copy the original pixels from snapshot to the modifiable SkPixmap. SkBitmap
++  // should already allocate the correct amount of pixels, so this shouldn't
++  // fail because of memory allocation.
++  auto pixmap_to_noise = bm.pixmap();
++  PaintImage paint_image = snapshot->PaintImageForCurrentFrame();
++  if (!paint_image.readPixels(bm.info(), pixmap_to_noise.writable_addr(),
++                               bm.rowBytes(), 0, 0)) {
++    return false;
++  }
++
++  base::span<uint8_t> modify_pixels =
++      gfx::SkPixmapToWritableSpan(pixmap_to_noise);
++
++  // Guaranteed to have a value, as per |ShouldApplyNoise|.
++  auto token_hash = NoiseHash(execution_context->CanvasNoiseToken().value());
++  NoisePixels(token_hash, modify_pixels, pixmap_to_noise.width(),
++              pixmap_to_noise.height());
++
++  auto noised_image = bm.asImage();
++  snapshot = blink::UnacceleratedStaticBitmapImage::Create(
++      std::move(noised_image), snapshot->Orientation());
++
++  constexpr int canvas_op_exclusive_max =
++      static_cast<int>(HighEntropyCanvasOpType::kMaxValue) << 1;
++  base::UmaHistogramExactLinear(
++      base::StrCat({kCanvasOperationMetricPrefix,
++                    GetContextTypeForMetrics(execution_context)}),
++      static_cast<int>(high_entropy_canvas_op_types), canvas_op_exclusive_max);
++
++  base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
++  base::UmaHistogramCustomMicrosecondsTimes(
++      "FingerprintingProtection.CanvasNoise.NoiseDuration", elapsed_time,
++      base::Microseconds(50), base::Milliseconds(100), 100);
++  base::UmaHistogramCounts1M("FingerprintingProtection.CanvasNoise.NoisedCanvasSize",
++                             pixmap_to_noise.width() * pixmap_to_noise.height());
++  UseCounter::Count(execution_context, WebFeature::kCanvasReadbackNoise);
++
++  return true;
++}
++
++}  // namespace blink
+diff --git a/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.h b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..70d53c3acc737714a8421b1036ec02b82effeb10
+--- /dev/null
++++ b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.h
+@@ -0,0 +1,24 @@
++// Copyright 2025 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_CORE_CANVAS_INTERVENTIONS_CANVAS_INTERVENTIONS_HELPER_H_
++#define THIRD_PARTY_BLINK_RENDERER_CORE_CANVAS_INTERVENTIONS_CANVAS_INTERVENTIONS_HELPER_H_
++
++#include "third_party/blink/renderer/core/core_export.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
++
++namespace blink {
++
++class CORE_EXPORT CanvasInterventionsHelper {
++ public:
++  // If allowed, performs noising on a copy of the snapshot StaticBitmapImage
++  // and returns true if noising was applied, false otherwise.
++  static bool MaybeNoiseSnapshot(ExecutionContext* execution_context,
++                                 scoped_refptr<StaticBitmapImage>& snapshot);
++};
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_CORE_CANVAS_INTERVENTIONS_CANVAS_INTERVENTIONS_HELPER_H_
+diff --git a/third_party/blink/renderer/core/exported/web_view_impl.cc b/third_party/blink/renderer/core/exported/web_view_impl.cc
+index ea0c1b2d7fa82a4022793945d7408b30c977a91b..919f30f7c9290928d3625805dc774769efcb38d4 100644
+--- a/third_party/blink/renderer/core/exported/web_view_impl.cc
++++ b/third_party/blink/renderer/core/exported/web_view_impl.cc
+@@ -3412,6 +3412,15 @@ void WebViewImpl::UpdateColorProviders(
+   }
+ }
+ 
++void WebViewImpl::UpdateCanvasNoiseToken(
++    std::optional<uint64_t> canvas_noise_token) {
++  page_->SetCanvasNoiseToken(canvas_noise_token);
++}
++
++std::optional<uint64_t> WebViewImpl::CanvasNoiseTokenForTesting() {
++  return page_->CanvasNoiseToken();
++}
++
+ void WebViewImpl::SetBaseBackgroundColorOverrideTransparent(
+     bool override_to_transparent) {
+   DCHECK(does_composite_);
+diff --git a/third_party/blink/renderer/core/exported/web_view_impl.h b/third_party/blink/renderer/core/exported/web_view_impl.h
+index b2788642a20511f3725d045bc97bc108fba88752..684820593d487f191ecd09c09583cf879864eedd 100644
+--- a/third_party/blink/renderer/core/exported/web_view_impl.h
++++ b/third_party/blink/renderer/core/exported/web_view_impl.h
+@@ -319,6 +319,10 @@ class CORE_EXPORT WebViewImpl final : public WebView,
+       network::mojom::AttributionSupport support) override;
+   void UpdateColorProviders(
+       const ColorProviderColorMaps& color_provider_colors) override;
++  void UpdateCanvasNoiseToken(
++      std::optional<uint64_t> canvas_noise_token) override;
++
++  std::optional<uint64_t> CanvasNoiseTokenForTesting();
+   void SetSupportsDraggableRegions(bool supports_draggable_regions) override;
+ 
+   void DispatchPersistedPageshow(base::TimeTicks navigation_start);
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index 922c787b9bd874e61281f446f45828693b551447..141133227ba604db526622bdf0860070a08be104 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -34,6 +34,7 @@
+ #include <utility>
+ 
+ #include "base/feature_list.h"
++#include "third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.h"
+ #include "base/functional/callback_helpers.h"
+ #include "base/location.h"
+ #include "base/metrics/histogram.h"
+@@ -1305,6 +1306,8 @@ String HTMLCanvasElement::ToDataURLInternal(
+ 
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(source_buffer);
+   if (image_bitmap) {
++    CanvasInterventionsHelper::MaybeNoiseSnapshot(GetExecutionContext(),
++                                                   image_bitmap);
+     std::unique_ptr<ImageDataBuffer> data_buffer =
+         ImageDataBuffer::Create(image_bitmap);
+     if (!data_buffer)
+@@ -1416,6 +1419,8 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+   CanvasAsyncBlobCreator* async_creator = nullptr;
+   scoped_refptr<StaticBitmapImage> image_bitmap = Snapshot(kBackBuffer);
+   if (image_bitmap) {
++    CanvasInterventionsHelper::MaybeNoiseSnapshot(GetExecutionContext(),
++                                                   image_bitmap);
+     auto* options = ImageEncodeOptions::Create();
+     options->setType(ImageEncoderUtils::MimeTypeName(encoding_mime_type));
+     async_creator = MakeGarbageCollected<CanvasAsyncBlobCreator>(
+diff --git a/third_party/blink/renderer/core/loader/document_loader.cc b/third_party/blink/renderer/core/loader/document_loader.cc
+index 7015542b622f0ceb3ce8209faa5edcc23852bdb2..f8a453b83a61a59babc31257e0a3af4ed0db3916 100644
+--- a/third_party/blink/renderer/core/loader/document_loader.cc
++++ b/third_party/blink/renderer/core/loader/document_loader.cc
+@@ -2860,7 +2860,13 @@ void DocumentLoader::CommitNavigation() {
+       ->GetRuntimeFeatureStateOverrideContext()
+       ->ApplyOverrideValuesFromParams(modified_runtime_features_);
+ 
+-  frame_->DomWindow()->SetCanvasNoiseToken(std::nullopt);
++  std::optional<uint64_t> canvas_noise_token_value =
++      frame_->GetPage()->CanvasNoiseToken();
++  frame_->DomWindow()->SetCanvasNoiseToken(
++      canvas_noise_token_value.has_value()
++          ? std::optional<blink::NoiseToken>(
++                blink::NoiseToken(canvas_noise_token_value.value()))
++          : std::nullopt);
+ 
+   // Previous same-document navigation tasks are not relevant once a
+   // cross-document navigation has happened.
+diff --git a/third_party/blink/renderer/core/page/page.h b/third_party/blink/renderer/core/page/page.h
+index 66155ba3a5a4a1d49f6dd918d18c870d5213da0f..774fd498d20eadfead8d1a7354b9355e9ef39069 100644
+--- a/third_party/blink/renderer/core/page/page.h
++++ b/third_party/blink/renderer/core/page/page.h
+@@ -205,6 +205,14 @@ class CORE_EXPORT Page final : public GarbageCollected<Page>,
+   // PluginsChangedObservers.
+   static void ResetPluginData();
+ 
++  // Canvas noise token for fingerprinting protection.
++  std::optional<uint64_t> CanvasNoiseToken() const {
++    return canvas_noise_token_;
++  }
++  void SetCanvasNoiseToken(std::optional<uint64_t> token) {
++    canvas_noise_token_ = token;
++  }
++
+   // When this method is called, page_scheduler_->SetIsMainFrameLocal should
+   // also be called to update accordingly.
+   // TODO(npm): update the |page_scheduler_| directly in this method.
+@@ -795,6 +803,9 @@ class CORE_EXPORT Page final : public GarbageCollected<Page>,
+   ForwardDeclaredMember<NoStatePrefetchClient> no_state_prefetch_client_;
+   ForwardDeclaredMember<AudioGraphTracer> audio_graph_tracer_;
+   ForwardDeclaredMember<InternalSettings> internal_settings_;
++
++  // Canvas noise token for per-page fingerprinting protection.
++  std::optional<uint64_t> canvas_noise_token_;
+ #if BUILDFLAG(IS_ANDROID)
+   ForwardDeclaredMember<SuspendCaptureObserver> suspend_capture_observer_;
+ #endif
