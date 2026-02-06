@@ -1,0 +1,373 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Fri, 6 Feb 2026 06:12:45 +0530
+Subject: feat: add JS override hooks for navigator.userAgent and userAgentData
+
+Add Blink-level override hooks that allow JS to intercept and modify
+navigator.userAgent, navigator.userAgentData, and
+navigator.userAgentData.getHighEntropyValues() via expando function
+properties (userAgentOverride, userAgentDataOverride,
+getHighEntropyValuesOverride).
+
+Changes:
+- navigator_id.idl/h: add [CallWith=ScriptState] to userAgent attribute
+- navigator_ua.idl/h: add [CallWith=ScriptState] to userAgentData attribute
+- navigator_base.cc/h: implement userAgent override hook via ScriptState
+- navigator_ua.cc: implement userAgentData override hook
+- navigator_ua_data.cc: implement getHighEntropyValues override hook
+- navigator_id.cc: fix appVersion() call site for new signature
+- navigator_ua.h: remove orphaned MaybeRecordMetrics declaration
+
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index bd55a1b554674b778aeb4e51fed8dec26bf2403c..ee7bfe0db6515590fe01aded472b573fa6322076 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -7,10 +7,14 @@
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ #include "third_party/blink/renderer/core/geolocation/geolocation.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+ 
+ #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_WIN)
+@@ -46,9 +50,54 @@ String GetReducedNavigatorPlatform() {
+ NavigatorBase::NavigatorBase(ExecutionContext* context)
+     : NavigatorLanguage(context), ExecutionContextClient(context) {}
+ 
+-String NavigatorBase::userAgent() const {
++String NavigatorBase::userAgent(ScriptState* script_state) const {
+   ExecutionContext* execution_context = GetExecutionContext();
+-  return execution_context ? execution_context->UserAgent() : String();
++  String user_agent = execution_context ? execution_context->UserAgent() : String();
++
++  if (!script_state || !script_state->ContextIsValid() || !execution_context) {
++    return user_agent;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++  v8::Local<v8::Context> context = script_state->GetContext();
++
++  v8::Local<v8::Value> navigator_value =
++      ToV8Traits<NavigatorBase>::ToV8(script_state,
++                                      const_cast<NavigatorBase*>(this));
++  if (navigator_value.IsEmpty() || !navigator_value->IsObject()) {
++    return user_agent;
++  }
++  v8::Local<v8::Object> navigator_object =
++      navigator_value.As<v8::Object>();
++
++  v8::Local<v8::Value> override_value;
++  if (!navigator_object
++           ->Get(context, V8AtomicString(isolate, "userAgentOverride"))
++           .ToLocal(&override_value) ||
++      !override_value->IsFunction()) {
++    return user_agent;
++  }
++
++  v8::Local<v8::Value> argv[] = {V8String(isolate, user_agent)};
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_value.As<v8::Function>(), execution_context,
++           navigator_object, 1, argv, isolate)
++           .ToLocal(&override_result)) {
++    return user_agent;
++  }
++
++  if (override_result->IsNullOrUndefined()) {
++    return user_agent;
++  }
++
++  v8::Local<v8::String> override_string;
++  if (!override_result->ToString(context).ToLocal(&override_string)) {
++    return user_agent;
++  }
++  return ToCoreString(isolate, override_string);
+ }
+ 
+ String NavigatorBase::platform() const {
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.h b/third_party/blink/renderer/core/execution_context/navigator_base.h
+index cf3eced2ec0f9c7a3bc18379d775ecaf023c5ce4..ef8e8bc29ad4be8bf92367d345b7ae3560c14a6e 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.h
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.h
+@@ -48,6 +48,7 @@ class Permissions;
+ class Serial;
+ class SmartCardResourceManager;
+ class StorageBucketManager;
++class ScriptState;
+ class USB;
+ class WakeLock;
+ 
+@@ -68,7 +69,7 @@ class CORE_EXPORT NavigatorBase : public ScriptWrappable,
+   explicit NavigatorBase(ExecutionContext* context);
+ 
+   // NavigatorID override
+-  String userAgent() const override;
++  String userAgent(ScriptState* script_state) const override;
+   String platform() const override;
+   void Trace(Visitor* visitor) const override;
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.cc b/third_party/blink/renderer/core/frame/navigator_id.cc
+index 50a1727f8dbd5d00bc3351fa847a87f210b52250..2602354b534a32ac7f3fbba01c7381ec05da05cf 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.cc
++++ b/third_party/blink/renderer/core/frame/navigator_id.cc
+@@ -54,7 +54,7 @@ String NavigatorID::appName() {
+ 
+ String NavigatorID::appVersion() {
+   // Version is everything in the user agent string past the "Mozilla/" prefix.
+-  const String& agent = userAgent();
++  const String& agent = userAgent(nullptr);
+   return agent.Substring(agent.find('/') + 1);
+ }
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.h b/third_party/blink/renderer/core/frame/navigator_id.h
+index fc1e98549fd02c5618079da4a36a89f43f9287aa..5edabdb4d917a7a8bae9dd2b41f32e4176b1e41b 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.h
++++ b/third_party/blink/renderer/core/frame/navigator_id.h
+@@ -36,6 +36,8 @@
+ 
+ namespace blink {
+ 
++class ScriptState;
++
+ class CORE_EXPORT NavigatorID {
+  public:
+   String appCodeName();
+@@ -43,7 +45,7 @@ class CORE_EXPORT NavigatorID {
+   String appVersion();
+   virtual String platform() const;
+   String product();
+-  virtual String userAgent() const = 0;
++  virtual String userAgent(ScriptState* script_state) const = 0;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.idl b/third_party/blink/renderer/core/frame/navigator_id.idl
+index 99da043b8a95318867b81a4b24a3a5208bd40601..32332c4d2ff2966f999792a78991cd86881981ff 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.idl
++++ b/third_party/blink/renderer/core/frame/navigator_id.idl
+@@ -38,5 +38,5 @@ interface mixin NavigatorID {
+     readonly attribute DOMString product; // constant "Gecko"
+     // https://www.w3.org/Bugs/Public/show_bug.cgi?id=22555
+     // boolean taintEnabled(); // constant false
+-    [MeasureAs=NavigatorUserAgent] readonly attribute DOMString userAgent;
++    [MeasureAs=NavigatorUserAgent, CallWith=ScriptState] readonly attribute DOMString userAgent;
+ };
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua.cc b/third_party/blink/renderer/core/frame/navigator_ua.cc
+index b4ff0369e8f704dfd2bf95a696d0aaee4fe903a3..44e42d54a4002bd7e685a118e76104025f56fd87 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua.cc
+@@ -6,15 +6,79 @@
+ 
+ #include "base/compiler_specific.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
++#include "third_party/blink/renderer/platform/bindings/v8_per_isolate_data.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+ namespace blink {
+ 
+-NavigatorUAData* NavigatorUA::userAgentData() {
++namespace {
++
++NavigatorUAData* ApplyUserAgentDataOverride(ScriptState* script_state,
++                                            ExecutionContext* execution_context,
++                                            NavigatorUAData* ua_data) {
++  if (!script_state || !script_state->ContextIsValid() || !execution_context) {
++    return ua_data;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++  v8::Local<v8::Context> context = script_state->GetContext();
++
++  v8::Local<v8::Value> navigator_value;
++  if (!context->Global()
++           ->Get(context, V8AtomicString(isolate, "navigator"))
++           .ToLocal(&navigator_value) ||
++      !navigator_value->IsObject()) {
++    return ua_data;
++  }
++
++  v8::Local<v8::Object> navigator_object = navigator_value.As<v8::Object>();
++  v8::Local<v8::Value> override_value;
++  if (!navigator_object
++           ->Get(context, V8AtomicString(isolate, "userAgentDataOverride"))
++           .ToLocal(&override_value) ||
++      !override_value->IsFunction()) {
++    return ua_data;
++  }
++
++  v8::Local<v8::Value> argv[] = {
++      ToV8Traits<NavigatorUAData>::ToV8(script_state, ua_data)};
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(override_value.As<v8::Function>(),
++                                    execution_context, navigator_object, 1,
++                                    argv, isolate)
++           .ToLocal(&override_result)) {
++    return ua_data;
++  }
++
++  if (override_result->IsNullOrUndefined() || !override_result->IsObject()) {
++    return ua_data;
++  }
++
++  const WrapperTypeInfo* wrapper_type_info =
++      NavigatorUAData::GetStaticWrapperTypeInfo();
++  if (!V8PerIsolateData::From(isolate)->HasInstance(wrapper_type_info,
++                                                    override_result)) {
++    return ua_data;
++  }
++
++  return ToScriptWrappable<NavigatorUAData>(
++      isolate, override_result.As<v8::Object>());
++}
++
++}  // namespace
++
++NavigatorUAData* NavigatorUA::userAgentData(ScriptState* script_state) {
+   // Return cached instance if it exists
+   if (ua_data_) {
+-    return ua_data_;
++    return ApplyUserAgentDataOverride(script_state, GetUAExecutionContext(),
++                                      ua_data_);
+   }
+ 
+   // Create and cache the NavigatorUAData instance
+@@ -39,7 +103,8 @@ NavigatorUAData* NavigatorUA::userAgentData() {
+   }
+   ua_data_->SetFormFactors(std::move(form_factors));
+ 
+-  return ua_data_;
++  return ApplyUserAgentDataOverride(script_state, GetUAExecutionContext(),
++                                    ua_data_);
+ }
+ 
+ void NavigatorUA::Trace(Visitor* visitor) const {
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua.h b/third_party/blink/renderer/core/frame/navigator_ua.h
+index cbcc88326032455da808a68f19aff895eccb0dc5..ca46404614fc755a1698fc1c04acc484c64c5d89 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua.h
++++ b/third_party/blink/renderer/core/frame/navigator_ua.h
+@@ -13,9 +13,11 @@
+ 
+ namespace blink {
+ 
++class ScriptState;
++
+ class CORE_EXPORT NavigatorUA : public GarbageCollectedMixin {
+  public:
+-  NavigatorUAData* userAgentData();
++  NavigatorUAData* userAgentData(ScriptState* script_state);
+ 
+   void Trace(Visitor* visitor) const override;
+ 
+@@ -23,10 +25,6 @@ class CORE_EXPORT NavigatorUA : public GarbageCollectedMixin {
+   virtual UserAgentMetadata GetUserAgentMetadata() const = 0;
+   virtual ExecutionContext* GetUAExecutionContext() const = 0;
+ 
+-  // Record identifiability study metrics for NavigatorUAData if the user is in
+-  // the study.
+-  void MaybeRecordMetrics(const NavigatorUAData& ua_data);
+-
+  private:
+   Member<NavigatorUAData> ua_data_;
+ };
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua.idl b/third_party/blink/renderer/core/frame/navigator_ua.idl
+index 3a74d659650397dcc161c3726f6417389e05d99a..61ef645a0f37254464edb9d44d9c42d1b3aa7d80 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua.idl
++++ b/third_party/blink/renderer/core/frame/navigator_ua.idl
+@@ -5,5 +5,5 @@
+ // https://github.com/WICG/ua-client-hints
+ 
+ interface mixin NavigatorUA {
+-  [SecureContext] readonly attribute NavigatorUAData userAgentData;
++  [SecureContext, CallWith=ScriptState] readonly attribute NavigatorUAData userAgentData;
+ };
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index a8c6a2fd37f8d8f13215844c95e00316763c2bf8..965ca86e7a7512d0cdd7e27a32792f100f6b42eb 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -8,13 +8,19 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-blink.h"
++#include "third_party/blink/renderer/bindings/core/v8/native_value_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_ua_data_values.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_ua_override_values.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/execution_context/agent.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/web_feature_forward.h"
+ #include "third_party/blink/renderer/core/page/page.h"
++#include "third_party/blink/renderer/platform/bindings/exception_state.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ 
+ namespace blink {
+@@ -434,6 +440,50 @@ ScriptPromise<UADataValues> NavigatorUAData::getHighEntropyValues(
+     }
+   }
+ 
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    ScriptState::Scope scope(script_state);
++    v8::Local<v8::Context> context = script_state->GetContext();
++
++    v8::Local<v8::Value> ua_data_value =
++        ToV8Traits<NavigatorUAData>::ToV8(
++            script_state, const_cast<NavigatorUAData*>(this));
++    if (!ua_data_value.IsEmpty() && ua_data_value->IsObject()) {
++      v8::Local<v8::Object> ua_data_object =
++          ua_data_value.As<v8::Object>();
++      v8::Local<v8::Value> override_value;
++      if (ua_data_object
++              ->Get(context, V8AtomicString(isolate,
++                                            "getHighEntropyValuesOverride"))
++              .ToLocal(&override_value) &&
++          override_value->IsFunction()) {
++        v8::Local<v8::Value> argv[] = {
++            ToV8Traits<UADataValues>::ToV8(script_state, values)};
++        v8::TryCatch try_catch(isolate);
++        v8::Local<v8::Value> override_result;
++        if (!V8ScriptRunner::CallFunction(
++                 override_value.As<v8::Function>(), execution_context,
++                 ua_data_object, 1, argv, isolate)
++                 .ToLocal(&override_result)) {
++          if (try_catch.HasCaught()) {
++            resolver->Reject(try_catch.Exception());
++            return promise;
++          }
++        } else if (!override_result->IsNullOrUndefined() &&
++                   override_result->IsObject()) {
++          NonThrowableExceptionState exception_state;
++          UADataValues* override_values =
++              NativeValueTraits<UADataValues>::NativeValue(
++                  isolate, override_result, exception_state);
++          if (!exception_state.HadException() && override_values) {
++            values = override_values;
++          }
++        }
++      }
++    }
++  }
++
+   execution_context->GetTaskRunner(TaskType::kPermission)
+       ->PostTask(
+           FROM_HERE,
