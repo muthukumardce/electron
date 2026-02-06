@@ -1,0 +1,1399 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Fri, 6 Feb 2026 08:14:57 +0530
+Subject: feat: add Blink override hooks for 19 APIs via window.customOverrides
+
+Implement JS override hooks for browser fingerprint spoofing using a
+centralized window.customOverrides.{interfaceKey}.{overrideName} pattern
+with a shared GetCustomOverrideFunction() helper.
+
+Batch 1 (10 Web Audio APIs):
+- AnalyserNode: getFloatFrequencyData, getByteFrequencyData,
+  getFloatTimeDomainData, getByteTimeDomainData
+- AudioBuffer: getChannelData
+- AudioContext: baseLatency, outputLatency
+- BaseAudioContext: createAnalyser, createDynamicsCompressor, createBuffer
+
+Batch 2 (9 APIs):
+- Cache: match, matchAll, add, addAll, put, delete, keys
+- CanvasRenderingContext2D: getImageData
+- crypto.subtle: encrypt
+
+Also refactors pre-existing overrides (userAgent, userAgentData,
+getHighEntropyValues) from per-object expando properties to the
+centralized window.customOverrides lookup.
+
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index ee7bfe0db6515590fe01aded472b573fa6322076..e1a0ea8d10b91058d0442569657a567887c0fb8b 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -9,6 +9,7 @@
+ #include "third_party/blink/public/common/features.h"
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ #include "third_party/blink/renderer/core/geolocation/geolocation.h"
+@@ -61,30 +62,19 @@ String NavigatorBase::userAgent(ScriptState* script_state) const {
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::HandleScope handle_scope(isolate);
+   ScriptState::Scope scope(script_state);
+-  v8::Local<v8::Context> context = script_state->GetContext();
+ 
+-  v8::Local<v8::Value> navigator_value =
+-      ToV8Traits<NavigatorBase>::ToV8(script_state,
+-                                      const_cast<NavigatorBase*>(this));
+-  if (navigator_value.IsEmpty() || !navigator_value->IsObject()) {
+-    return user_agent;
+-  }
+-  v8::Local<v8::Object> navigator_object =
+-      navigator_value.As<v8::Object>();
+-
+-  v8::Local<v8::Value> override_value;
+-  if (!navigator_object
+-           ->Get(context, V8AtomicString(isolate, "userAgentOverride"))
+-           .ToLocal(&override_value) ||
+-      !override_value->IsFunction()) {
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "navigator", "userAgentOverride");
++  if (override_fn.IsEmpty()) {
+     return user_agent;
+   }
+ 
++  v8::Local<v8::Context> context = script_state->GetContext();
+   v8::Local<v8::Value> argv[] = {V8String(isolate, user_agent)};
+   v8::Local<v8::Value> override_result;
+   if (!V8ScriptRunner::CallFunction(
+-           override_value.As<v8::Function>(), execution_context,
+-           navigator_object, 1, argv, isolate)
++           override_fn, execution_context,
++           context->Global(), 1, argv, isolate)
+            .ToLocal(&override_result)) {
+     return user_agent;
+   }
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua.cc b/third_party/blink/renderer/core/frame/navigator_ua.cc
+index 44e42d54a4002bd7e685a118e76104025f56fd87..812eb852a02eb2c11b3b53453be81ee18119b241 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua.cc
+@@ -8,6 +8,7 @@
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+@@ -30,29 +31,17 @@ NavigatorUAData* ApplyUserAgentDataOverride(ScriptState* script_state,
+   ScriptState::Scope scope(script_state);
+   v8::Local<v8::Context> context = script_state->GetContext();
+ 
+-  v8::Local<v8::Value> navigator_value;
+-  if (!context->Global()
+-           ->Get(context, V8AtomicString(isolate, "navigator"))
+-           .ToLocal(&navigator_value) ||
+-      !navigator_value->IsObject()) {
+-    return ua_data;
+-  }
+-
+-  v8::Local<v8::Object> navigator_object = navigator_value.As<v8::Object>();
+-  v8::Local<v8::Value> override_value;
+-  if (!navigator_object
+-           ->Get(context, V8AtomicString(isolate, "userAgentDataOverride"))
+-           .ToLocal(&override_value) ||
+-      !override_value->IsFunction()) {
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "navigator", "userAgentDataOverride");
++  if (override_fn.IsEmpty()) {
+     return ua_data;
+   }
+ 
+   v8::Local<v8::Value> argv[] = {
+       ToV8Traits<NavigatorUAData>::ToV8(script_state, ua_data)};
+   v8::Local<v8::Value> override_result;
+-  if (!V8ScriptRunner::CallFunction(override_value.As<v8::Function>(),
+-                                    execution_context, navigator_object, 1,
+-                                    argv, isolate)
++  if (!V8ScriptRunner::CallFunction(override_fn, execution_context,
++                                    context->Global(), 1, argv, isolate)
+            .ToLocal(&override_result)) {
+     return ua_data;
+   }
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index 965ca86e7a7512d0cdd7e27a32792f100f6b42eb..bd084e1a7490fd8c500d180711cd6bcf6fe60a4a 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -14,6 +14,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/v8_ua_data_values.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_ua_override_values.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/core/execution_context/agent.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/web_feature_forward.h"
+@@ -446,39 +447,29 @@ ScriptPromise<UADataValues> NavigatorUAData::getHighEntropyValues(
+     ScriptState::Scope scope(script_state);
+     v8::Local<v8::Context> context = script_state->GetContext();
+ 
+-    v8::Local<v8::Value> ua_data_value =
+-        ToV8Traits<NavigatorUAData>::ToV8(
+-            script_state, const_cast<NavigatorUAData*>(this));
+-    if (!ua_data_value.IsEmpty() && ua_data_value->IsObject()) {
+-      v8::Local<v8::Object> ua_data_object =
+-          ua_data_value.As<v8::Object>();
+-      v8::Local<v8::Value> override_value;
+-      if (ua_data_object
+-              ->Get(context, V8AtomicString(isolate,
+-                                            "getHighEntropyValuesOverride"))
+-              .ToLocal(&override_value) &&
+-          override_value->IsFunction()) {
+-        v8::Local<v8::Value> argv[] = {
+-            ToV8Traits<UADataValues>::ToV8(script_state, values)};
+-        v8::TryCatch try_catch(isolate);
+-        v8::Local<v8::Value> override_result;
+-        if (!V8ScriptRunner::CallFunction(
+-                 override_value.As<v8::Function>(), execution_context,
+-                 ua_data_object, 1, argv, isolate)
+-                 .ToLocal(&override_result)) {
+-          if (try_catch.HasCaught()) {
+-            resolver->Reject(try_catch.Exception());
+-            return promise;
+-          }
+-        } else if (!override_result->IsNullOrUndefined() &&
+-                   override_result->IsObject()) {
+-          NonThrowableExceptionState exception_state;
+-          UADataValues* override_values =
+-              NativeValueTraits<UADataValues>::NativeValue(
+-                  isolate, override_result, exception_state);
+-          if (!exception_state.HadException() && override_values) {
+-            values = override_values;
+-          }
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "navigatorUAData", "getHighEntropyValuesOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> argv[] = {
++          ToV8Traits<UADataValues>::ToV8(script_state, values)};
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (!V8ScriptRunner::CallFunction(
++               override_fn, execution_context,
++               context->Global(), 1, argv, isolate)
++               .ToLocal(&override_result)) {
++        if (try_catch.HasCaught()) {
++          resolver->Reject(try_catch.Exception());
++          return promise;
++        }
++      } else if (!override_result->IsNullOrUndefined() &&
++                 override_result->IsObject()) {
++        NonThrowableExceptionState exception_state;
++        UADataValues* override_values =
++            NativeValueTraits<UADataValues>::NativeValue(
++                isolate, override_result, exception_state);
++        if (!exception_state.HadException() && override_values) {
++          values = override_values;
+         }
+       }
+     }
+diff --git a/third_party/blink/renderer/modules/cache_storage/cache.cc b/third_party/blink/renderer/modules/cache_storage/cache.cc
+index c1bf9a1d13c3a7e805b95cc7d5305a03b3eb0c91..0a72a69da43d3be99e1c3e2bfe3434820465b5d1 100644
+--- a/third_party/blink/renderer/modules/cache_storage/cache.cc
++++ b/third_party/blink/renderer/modules/cache_storage/cache.cc
+@@ -5,6 +5,7 @@
+ #include "third_party/blink/renderer/modules/cache_storage/cache.h"
+ 
+ #include <memory>
++#include <optional>
+ #include <utility>
+ 
+ #include "base/containers/contains.h"
+@@ -19,10 +20,13 @@
+ #include "third_party/blink/renderer/bindings/core/v8/native_value_traits_impl.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_function.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_binding_for_core.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_code_cache.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_request_init.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_response.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_request_usvstring.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_response_undefined.h"
+@@ -157,6 +161,44 @@ bool ShouldGenerateV8CodeCache(ScriptState* script_state,
+   return true;
+ }
+ 
++template <typename T>
++std::optional<ScriptPromise<T>> MaybeCachePromiseOverride(
++    ScriptState* script_state,
++    const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return std::nullopt;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "cache", override_name);
++  if (override_fn.IsEmpty())
++    return std::nullopt;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn,
++           ExecutionContext::From(script_state), context->Global(), 0, nullptr,
++           isolate)
++           .ToLocal(&override_result)) {
++    if (try_catch.HasCaught()) {
++      v8::Local<v8::Promise::Resolver> v8_resolver;
++      if (!v8::Promise::Resolver::New(context).ToLocal(&v8_resolver))
++        return std::nullopt;
++      v8_resolver->Reject(context, try_catch.Exception()).Check();
++      return ScriptPromise<T>::FromV8Promise(
++          isolate, v8_resolver->GetPromise());
++    }
++    return std::nullopt;
++  }
++
++  return ScriptPromise<T>::FromV8Value(script_state, override_result);
++}
++
+ }  // namespace
+ 
+ // Waits for all expected Responses and their blob bodies to be available.
+@@ -677,6 +719,12 @@ ScriptPromise<V8UnionResponseOrUndefined> Cache::match(
+     const CacheQueryOptions* options,
+     ExceptionState& exception_state) {
+   DCHECK(request);
++  {
++    auto override_result = MaybeCachePromiseOverride<V8UnionResponseOrUndefined>(
++        script_state, "matchOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   Request* request_object = nullptr;
+   switch (request->GetContentType()) {
+     case V8RequestInfo::ContentType::kRequest:
+@@ -695,6 +743,12 @@ ScriptPromise<V8UnionResponseOrUndefined> Cache::match(
+ ScriptPromise<IDLSequence<Response>> Cache::matchAll(
+     ScriptState* script_state,
+     ExceptionState& exception_state) {
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLSequence<Response>>(
++        script_state, "matchAllOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   return MatchAllImpl(script_state, nullptr, CacheQueryOptions::Create(),
+                       exception_state);
+ }
+@@ -704,6 +758,12 @@ ScriptPromise<IDLSequence<Response>> Cache::matchAll(
+     const V8RequestInfo* request,
+     const CacheQueryOptions* options,
+     ExceptionState& exception_state) {
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLSequence<Response>>(
++        script_state, "matchAllOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   Request* request_object = nullptr;
+   if (request) {
+     switch (request->GetContentType()) {
+@@ -725,6 +785,12 @@ ScriptPromise<IDLUndefined> Cache::add(ScriptState* script_state,
+                                        const V8RequestInfo* request,
+                                        ExceptionState& exception_state) {
+   DCHECK(request);
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLUndefined>(
++        script_state, "addOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   HeapVector<Member<Request>> requests;
+   switch (request->GetContentType()) {
+     case V8RequestInfo::ContentType::kRequest:
+@@ -744,6 +810,12 @@ ScriptPromise<IDLUndefined> Cache::addAll(
+     ScriptState* script_state,
+     const HeapVector<Member<V8RequestInfo>>& requests,
+     ExceptionState& exception_state) {
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLUndefined>(
++        script_state, "addAllOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   HeapVector<Member<Request>> request_objects;
+   for (const V8RequestInfo* request : requests) {
+     switch (request->GetContentType()) {
+@@ -767,6 +839,12 @@ ScriptPromise<IDLBoolean> Cache::Delete(ScriptState* script_state,
+                                         const CacheQueryOptions* options,
+                                         ExceptionState& exception_state) {
+   DCHECK(request);
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLBoolean>(
++        script_state, "deleteOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   Request* request_object = nullptr;
+   switch (request->GetContentType()) {
+     case V8RequestInfo::ContentType::kRequest:
+@@ -787,6 +865,12 @@ ScriptPromise<IDLUndefined> Cache::put(ScriptState* script_state,
+                                        Response* response,
+                                        ExceptionState& exception_state) {
+   DCHECK(request_info);
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLUndefined>(
++        script_state, "putOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   int64_t trace_id = blink::cache_storage::CreateTraceId();
+   TRACE_EVENT_WITH_FLOW0("CacheStorage", "Cache::put",
+                          TRACE_ID_GLOBAL(trace_id), TRACE_EVENT_FLAG_FLOW_OUT);
+@@ -826,6 +910,12 @@ ScriptPromise<IDLUndefined> Cache::put(ScriptState* script_state,
+ ScriptPromise<IDLSequence<Request>> Cache::keys(
+     ScriptState* script_state,
+     ExceptionState& exception_state) {
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLSequence<Request>>(
++        script_state, "keysOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   return KeysImpl(script_state, nullptr, CacheQueryOptions::Create(),
+                   exception_state);
+ }
+@@ -835,6 +925,12 @@ ScriptPromise<IDLSequence<Request>> Cache::keys(
+     const V8RequestInfo* request,
+     const CacheQueryOptions* options,
+     ExceptionState& exception_state) {
++  {
++    auto override_result = MaybeCachePromiseOverride<IDLSequence<Request>>(
++        script_state, "keysOverride");
++    if (override_result.has_value())
++      return *override_result;
++  }
+   Request* request_object = nullptr;
+   if (request) {
+     switch (request->GetContentType()) {
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+index 0d8eb430d6a557d658b713b4794a74986ef0cb4a..d19a44c2e26cb3fb71608e6aebc85dd8d5d34815 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.cc
+@@ -29,8 +29,10 @@
+ #include "third_party/abseil-cpp/absl/cleanup/cleanup.h"
+ #include "third_party/blink/public/common/metrics/document_update_reason.h"
+ #include "third_party/blink/public/mojom/devtools/console_message.mojom-blink-forward.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_align.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_canvas_text_baseline.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_text_cluster_options.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_canvas_2d_gpu_transfer_option.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_canvas_direction.h"
+@@ -64,7 +66,10 @@
+ #include "third_party/blink/renderer/modules/webgpu/gpu.h"
+ #include "third_party/blink/renderer/modules/webgpu/gpu_device.h"
+ #include "third_party/blink/renderer/modules/webgpu/gpu_texture.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_code.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/fonts/font.h"
+ #include "third_party/blink/renderer/platform/fonts/font_selection_types.h"
+ #include "third_party/blink/renderer/platform/fonts/font_selector.h"
+@@ -342,28 +347,32 @@ ImageData* BaseRenderingContext2D::createImageData(
+ }
+ 
+ ImageData* BaseRenderingContext2D::getImageData(
++    ScriptState* script_state,
+     int sx,
+     int sy,
+     int sw,
+     int sh,
+     ExceptionState& exception_state) {
+-  return getImageDataInternal(sx, sy, sw, sh, /*image_data_settings=*/nullptr,
++  return getImageDataInternal(script_state, sx, sy, sw, sh,
++                              /*image_data_settings=*/nullptr,
+                               exception_state);
+ }
+ 
+ ImageData* BaseRenderingContext2D::getImageData(
++    ScriptState* script_state,
+     int sx,
+     int sy,
+     int sw,
+     int sh,
+     ImageDataSettings* image_data_settings,
+     ExceptionState& exception_state) {
+-  return getImageDataInternal(sx, sy, sw, sh, image_data_settings,
+-                              exception_state);
++  return getImageDataInternal(script_state, sx, sy, sw, sh,
++                              image_data_settings, exception_state);
+ }
+ perfetto::EventContext GetEventContext();
+ 
+ ImageData* BaseRenderingContext2D::getImageDataInternal(
++    ScriptState* script_state,
+     int sx,
+     int sy,
+     int sw,
+@@ -525,6 +534,26 @@ ImageData* BaseRenderingContext2D::getImageDataInternal(
+     }
+   }
+ 
++  // Override hook: call getImageDataOverride from window.customOverrides
++  if (script_state && script_state->ContextIsValid() && image_data) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    ScriptState::Scope scope(script_state);
++
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "canvasRenderingContext2D", "getImageDataOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Context> context = script_state->GetContext();
++      v8::Local<v8::Value> argv[] = {
++          ToV8Traits<ImageData>::ToV8(script_state, image_data)};
++      v8::TryCatch try_catch(isolate);
++      std::ignore = V8ScriptRunner::CallFunction(
++          override_fn,
++          ExecutionContext::From(script_state), context->Global(), 1, argv,
++          isolate);
++    }
++  }
++
+   return image_data;
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
+index 24ae3ea32abd3377827953b4df1edb02364ff96b..9a913c4f49c135a5b9a426c9fcfa52d5bbdf94ba 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.h
+@@ -60,6 +60,7 @@ class ExceptionState;
+ class GPUTexture;
+ class ImageData;
+ class ImageDataSettings;
++class ScriptState;
+ class TextCluster;
+ class TextClusterOptions;
+ class TextMetrics;
+@@ -114,14 +115,16 @@ class MODULES_EXPORT BaseRenderingContext2D : public CanvasRenderingContext,
+ 
+   // For deferred canvases this will have the side effect of drawing recorded
+   // commands in order to finalize the frame
+-  ImageData* getImageData(int sx, int sy, int sw, int sh, ExceptionState&);
+-  ImageData* getImageData(int sx,
++  ImageData* getImageData(ScriptState*, int sx, int sy, int sw, int sh, ExceptionState&);
++  ImageData* getImageData(ScriptState* script_state,
++                          int sx,
+                           int sy,
+                           int sw,
+                           int sh,
+                           ImageDataSettings*,
+                           ExceptionState&);
+-  virtual ImageData* getImageDataInternal(int sx,
++  virtual ImageData* getImageDataInternal(ScriptState*,
++                                          int sx,
+                                           int sy,
+                                           int sw,
+                                           int sh,
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.idl b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.idl
+index 33e2e42aac4f158975be2b73412267594fe333b1..b38aa9ba3048653390bd90c621ed1d88bf92fc59 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.idl
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/base_rendering_context_2d.idl
+@@ -25,8 +25,8 @@ interface mixin BaseRenderingContext2D {
+     [RaisesException] ImageData createImageData(ImageData imagedata);
+     [RaisesException] ImageData createImageData([EnforceRange] long sw, [EnforceRange] long sh);
+     [RaisesException] ImageData createImageData([EnforceRange] long sw, [EnforceRange] long sh, ImageDataSettings imageDataSettings);
+-    [MeasureAs=Canvas2DGetImageData, RaisesException] ImageData getImageData([EnforceRange] long sx, [EnforceRange] long sy, [EnforceRange] long sw, [EnforceRange] long sh);
+-    [MeasureAs=Canvas2DGetImageData, RaisesException] ImageData getImageData([EnforceRange] long sx, [EnforceRange] long sy, [EnforceRange] long sw, [EnforceRange] long sh, ImageDataSettings imageDataSettings);
++    [CallWith=ScriptState, MeasureAs=Canvas2DGetImageData, RaisesException] ImageData getImageData([EnforceRange] long sx, [EnforceRange] long sy, [EnforceRange] long sw, [EnforceRange] long sh);
++    [CallWith=ScriptState, MeasureAs=Canvas2DGetImageData, RaisesException] ImageData getImageData([EnforceRange] long sx, [EnforceRange] long sy, [EnforceRange] long sw, [EnforceRange] long sh, ImageDataSettings imageDataSettings);
+     [NoAllocDirectCall, RaisesException] void putImageData(ImageData imagedata, [EnforceRange] long dx, [EnforceRange] long dy);
+     [NoAllocDirectCall, RaisesException] void putImageData(ImageData imagedata, [EnforceRange] long dx, [EnforceRange] long dy, [EnforceRange] long dirtyX, [EnforceRange] long dirtyY, [EnforceRange] long dirtyWidth, [EnforceRange] long dirtyHeight);
+ 
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.cc
+index ac14f5b6e91bdccbfd731c667572319a5ac98e02..e8b9af27b9f34e89963b0f6c51a220fe2445cf65 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.cc
+@@ -735,6 +735,7 @@ scoped_refptr<StaticBitmapImage> blink::CanvasRenderingContext2D::GetImage() {
+ }
+ 
+ ImageData* CanvasRenderingContext2D::getImageDataInternal(
++    ScriptState* script_state,
+     int sx,
+     int sy,
+     int sw,
+@@ -746,7 +747,7 @@ ImageData* CanvasRenderingContext2D::getImageDataInternal(
+       CreationAttributes().will_read_frequently ==
+           CanvasContextCreationAttributesCore::WillReadFrequently::kTrue);
+   return BaseRenderingContext2D::getImageDataInternal(
+-      sx, sy, sw, sh, image_data_settings, exception_state);
++      script_state, sx, sy, sw, sh, image_data_settings, exception_state);
+ }
+ 
+ DOMMatrix* CanvasRenderingContext2D::drawElement(
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.h b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.h
+index 842382a462981e41ee539d4b3c93085573762006..da86b54b3458d7389f5c0e55243150a7fa65546b 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.h
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d.h
+@@ -237,7 +237,8 @@ class MODULES_EXPORT CanvasRenderingContext2D final
+ 
+   void Trace(Visitor*) const override;
+ 
+-  ImageData* getImageDataInternal(int sx,
++  ImageData* getImageDataInternal(ScriptState*,
++                                  int sx,
+                                   int sy,
+                                   int sw,
+                                   int sh,
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_api_test.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_api_test.cc
+index 43445c6a05b569298c2278cd850d613ac10ce13d..8dd0d01dcf671057504a8783ce0117138235f540 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_api_test.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_api_test.cc
+@@ -329,7 +329,7 @@ TEST_F(CanvasRenderingContext2DAPITest, GetImageDataTooBig) {
+   CreateContext(kNonOpaque);
+   DummyExceptionStateForTesting exception_state;
+   ImageDataSettings* settings = ImageDataSettings::Create();
+-  ImageData* image_data = Context2D()->getImageData(0, 0, 1000000, 1000000,
++  ImageData* image_data = Context2D()->getImageData(nullptr, 0, 0, 1000000, 1000000,
+                                                     settings, exception_state);
+   EXPECT_EQ(nullptr, image_data);
+   EXPECT_TRUE(exception_state.HadException());
+@@ -343,7 +343,7 @@ TEST_F(CanvasRenderingContext2DAPITest,
+   {
+     DummyExceptionStateForTesting exception_state;
+     ImageData* image_data = Context2D()->getImageData(
+-        1, -2147483647, 1, -2147483647, settings, exception_state);
++        nullptr, 1, -2147483647, 1, -2147483647, settings, exception_state);
+     EXPECT_EQ(nullptr, image_data);
+     EXPECT_TRUE(exception_state.HadException());
+     EXPECT_EQ(ESErrorType::kRangeError, exception_state.CodeAs<ESErrorType>());
+@@ -352,7 +352,7 @@ TEST_F(CanvasRenderingContext2DAPITest,
+   {
+     DummyExceptionStateForTesting exception_state;
+     ImageData* image_data = Context2D()->getImageData(
+-        -2147483647, 1, -2147483647, 1, settings, exception_state);
++        nullptr, -2147483647, 1, -2147483647, 1, settings, exception_state);
+     EXPECT_EQ(nullptr, image_data);
+     EXPECT_TRUE(exception_state.HadException());
+     EXPECT_EQ(ESErrorType::kRangeError, exception_state.CodeAs<ESErrorType>());
+@@ -444,7 +444,7 @@ TEST_F(CanvasRenderingContext2DAPITest, UnclosedLayerGetImageData) {
+ 
+   // Throws inside layers:
+   DummyExceptionStateForTesting exception_state;
+-  Context2D()->getImageData(/*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1,
++  Context2D()->getImageData(nullptr, /*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1,
+                             exception_state);
+   EXPECT_EQ(exception_state.CodeAs<DOMExceptionCode>(),
+             DOMExceptionCode::kInvalidStateError);
+@@ -452,7 +452,7 @@ TEST_F(CanvasRenderingContext2DAPITest, UnclosedLayerGetImageData) {
+   Context2D()->endLayer(no_exception);
+ 
+   // Doesn't throw outside layers:
+-  Context2D()->getImageData(/*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1,
++  Context2D()->getImageData(nullptr, /*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1,
+                             no_exception);
+ }
+ 
+diff --git a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_test.cc b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_test.cc
+index d097ce83b63a335f0eca1ba0fddd4e417f7424dc..7b907c39519e6502a63abe1b0a7e891eb193f963 100644
+--- a/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_test.cc
++++ b/third_party/blink/renderer/modules/canvas/canvas2d/canvas_rendering_context_2d_test.cc
+@@ -1581,7 +1581,7 @@ TEST_P(CanvasRenderingContext2DTest,
+   ImageDataSettings* settings = ImageDataSettings::Create();
+   int read_count = BaseRenderingContext2D::kFallbackToCPUAfterReadbacks;
+   while (read_count--) {
+-    Context2D()->getImageData(0, 0, 1, 1, settings, exception_state);
++    Context2D()->getImageData(nullptr, 0, 0, 1, 1, settings, exception_state);
+   }
+   EXPECT_EQ(CanvasElement().GetRasterModeForCanvas2D(), RasterMode::kCPU);
+ }
+@@ -2054,7 +2054,7 @@ TEST_P(CanvasRenderingContext2DTestAccelerated,
+   NonThrowableExceptionState exception_state;
+   ImageDataSettings* settings = ImageDataSettings::Create();
+   EXPECT_EQ(CanvasElement().GetRasterModeForCanvas2D(), RasterMode::kGPU);
+-  Context2D()->getImageData(0, 0, 1, 1, settings, exception_state);
++  Context2D()->getImageData(nullptr, 0, 0, 1, 1, settings, exception_state);
+   EXPECT_EQ(CanvasElement().GetRasterModeForCanvas2D(), RasterMode::kGPU);
+ }
+ 
+@@ -2077,7 +2077,7 @@ TEST_P(CanvasRenderingContext2DTestAccelerated,
+   ASSERT_TRUE(handler.IsHibernating());
+ 
+   NonThrowableExceptionState exception_state;
+-  Context2D()->getImageData(0, 0, 1, 1, exception_state);
++  Context2D()->getImageData(nullptr, 0, 0, 1, 1, exception_state);
+ 
+   EXPECT_TRUE(handler.IsHibernating());
+ }
+diff --git a/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d_test.cc b/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d_test.cc
+index e4882e0c254c509d89540cdc18c7bb872ef3b836..d56d6506dee7cdbb5179fefc5809fe4f90c68181 100644
+--- a/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d_test.cc
++++ b/third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d_test.cc
+@@ -211,7 +211,7 @@ TEST(OffscreenCanvasRenderingContext2DTest, UnclosedLayerGetImageData) {
+                       no_exception);
+ 
+   // Throws inside layers:
+-  context->getImageData(/*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1,
++  context->getImageData(nullptr, /*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1,
+                         scope.GetExceptionState());
+   EXPECT_EQ(scope.GetExceptionState().CodeAs<DOMExceptionCode>(),
+             DOMExceptionCode::kInvalidStateError);
+@@ -219,7 +219,7 @@ TEST(OffscreenCanvasRenderingContext2DTest, UnclosedLayerGetImageData) {
+   context->endLayer(no_exception);
+ 
+   // Doesn't throw outside layers:
+-  context->getImageData(/*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1, no_exception);
++  context->getImageData(nullptr, /*sx=*/0, /*sy=*/0, /*sw=*/1, /*sh=*/1, no_exception);
+ }
+ 
+ // Checks `putImageData` throws an exception if called inside a layer.
+diff --git a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
+index c024bef235a0286cb1bcac5ab4296fccbda7e08f..482444a487235ea66988cd24b3c32c945e89f3fb 100644
+--- a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
++++ b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
+@@ -40,6 +40,8 @@
+ #include "third_party/blink/public/web/web_crypto_histograms.h"
+ #include "third_party/blink/renderer/bindings/core/v8/dictionary.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_json_web_key.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_union_arraybuffer_arraybufferview_jsonwebkey.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+@@ -50,6 +52,7 @@
+ #include "third_party/blink/renderer/modules/crypto/crypto_result_impl.h"
+ #include "third_party/blink/renderer/modules/crypto/crypto_utilities.h"
+ #include "third_party/blink/renderer/modules/crypto/normalize_algorithm.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/json/json_values.h"
+ 
+ namespace blink {
+@@ -122,6 +125,38 @@ ScriptPromise<IDLAny> SubtleCrypto::encrypt(
+     CryptoKey* key,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    ScriptState::Scope scope(script_state);
++
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "subtleCrypto", "encryptOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Context> context = script_state->GetContext();
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (!V8ScriptRunner::CallFunction(
++               override_fn,
++               ExecutionContext::From(script_state), context->Global(), 0,
++               nullptr, isolate)
++               .ToLocal(&override_result)) {
++        if (try_catch.HasCaught()) {
++          v8::Local<v8::Promise::Resolver> v8_resolver;
++          if (v8::Promise::Resolver::New(context).ToLocal(&v8_resolver)) {
++            v8_resolver->Reject(context, try_catch.Exception()).Check();
++            return ScriptPromise<IDLAny>::FromV8Promise(
++                isolate, v8_resolver->GetPromise());
++          }
++        }
++      } else {
++        return ScriptPromise<IDLAny>::FromV8Value(
++            script_state, override_result);
++      }
++    }
++  }
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-encrypt
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/analyser_node.cc b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+index 688a2fec77ee202445ec87aee1503d3161b94878..870985143a53b67a42ccdc87e119c977b710c4f3 100644
+--- a/third_party/blink/renderer/modules/webaudio/analyser_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+@@ -25,13 +25,46 @@
+ 
+ #include "third_party/blink/renderer/modules/webaudio/analyser_node.h"
+ 
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_analyser_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/analyser_handler.h"
+ #include "third_party/blink/renderer/modules/webaudio/audio_graph_tracer.h"
+ #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ 
+ namespace blink {
+ 
++namespace {
++
++void MaybeCallVoidOverride(ScriptState* script_state,
++                           const char* override_name,
++                           v8::Local<v8::Value> array_value) {
++  if (!script_state || !script_state->ContextIsValid()) {
++    return;
++  }
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "analyserNode", override_name);
++  if (override_fn.IsEmpty()) {
++    return;
++  }
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {array_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn,
++      ExecutionContext::From(script_state), context->Global(), 1, argv, isolate);
++}
++
++}  // namespace
++
+ AnalyserNode::AnalyserNode(BaseAudioContext& context) : AudioNode(context) {
+   SetHandler(AnalyserHandler::Create(*this, context.sampleRate()));
+ }
+@@ -116,22 +149,50 @@ double AnalyserNode::smoothingTimeConstant() const {
+   return GetAnalyserHandler().SmoothingTimeConstant();
+ }
+ 
+-void AnalyserNode::getFloatFrequencyData(NotShared<DOMFloat32Array> array) {
++void AnalyserNode::getFloatFrequencyData(ScriptState* script_state,
++                                         NotShared<DOMFloat32Array> array) {
+   GetAnalyserHandler().GetFloatFrequencyData(array.Get(),
+                                              context()->currentTime());
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Value> array_value =
++        ToV8Traits<DOMFloat32Array>::ToV8(script_state, array.Get());
++    MaybeCallVoidOverride(script_state,
++                          "getFloatFrequencyDataOverride", array_value);
++  }
+ }
+ 
+-void AnalyserNode::getByteFrequencyData(NotShared<DOMUint8Array> array) {
++void AnalyserNode::getByteFrequencyData(ScriptState* script_state,
++                                        NotShared<DOMUint8Array> array) {
+   GetAnalyserHandler().GetByteFrequencyData(array.Get(),
+                                             context()->currentTime());
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Value> array_value =
++        ToV8Traits<DOMUint8Array>::ToV8(script_state, array.Get());
++    MaybeCallVoidOverride(script_state,
++                          "getByteFrequencyDataOverride", array_value);
++  }
+ }
+ 
+-void AnalyserNode::getFloatTimeDomainData(NotShared<DOMFloat32Array> array) {
++void AnalyserNode::getFloatTimeDomainData(ScriptState* script_state,
++                                          NotShared<DOMFloat32Array> array) {
+   GetAnalyserHandler().GetFloatTimeDomainData(array.Get());
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Value> array_value =
++        ToV8Traits<DOMFloat32Array>::ToV8(script_state, array.Get());
++    MaybeCallVoidOverride(script_state,
++                          "getFloatTimeDomainDataOverride", array_value);
++  }
+ }
+ 
+-void AnalyserNode::getByteTimeDomainData(NotShared<DOMUint8Array> array) {
++void AnalyserNode::getByteTimeDomainData(ScriptState* script_state,
++                                         NotShared<DOMUint8Array> array) {
+   GetAnalyserHandler().GetByteTimeDomainData(array.Get());
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Value> array_value =
++        ToV8Traits<DOMUint8Array>::ToV8(script_state, array.Get());
++    MaybeCallVoidOverride(script_state,
++                          "getByteTimeDomainDataOverride", array_value);
++  }
+ }
+ 
+ void AnalyserNode::ReportDidCreate() {
+diff --git a/third_party/blink/renderer/modules/webaudio/analyser_node.h b/third_party/blink/renderer/modules/webaudio/analyser_node.h
+index 40d541b6d8fb6ffa6f9a0b7c1ed8607f1e9e33ee..23861f42b0e3996237e6117d573f4e03e4611b1f 100644
+--- a/third_party/blink/renderer/modules/webaudio/analyser_node.h
++++ b/third_party/blink/renderer/modules/webaudio/analyser_node.h
+@@ -36,6 +36,7 @@ class AnalyserHandler;
+ class AnalyserOptions;
+ class BaseAudioContext;
+ class ExceptionState;
++class ScriptState;
+ 
+ class AnalyserNode final : public AudioNode {
+   DEFINE_WRAPPERTYPEINFO();
+@@ -57,10 +58,10 @@ class AnalyserNode final : public AudioNode {
+   double maxDecibels() const;
+   void setSmoothingTimeConstant(double, ExceptionState&);
+   double smoothingTimeConstant() const;
+-  void getFloatFrequencyData(NotShared<DOMFloat32Array>);
+-  void getByteFrequencyData(NotShared<DOMUint8Array>);
+-  void getFloatTimeDomainData(NotShared<DOMFloat32Array>);
+-  void getByteTimeDomainData(NotShared<DOMUint8Array>);
++  void getFloatFrequencyData(ScriptState*, NotShared<DOMFloat32Array>);
++  void getByteFrequencyData(ScriptState*, NotShared<DOMUint8Array>);
++  void getFloatTimeDomainData(ScriptState*, NotShared<DOMFloat32Array>);
++  void getByteTimeDomainData(ScriptState*, NotShared<DOMUint8Array>);
+ 
+   // InspectorHelperMixin
+   void ReportDidCreate() final;
+diff --git a/third_party/blink/renderer/modules/webaudio/analyser_node.idl b/third_party/blink/renderer/modules/webaudio/analyser_node.idl
+index 35e36b7344f86051c89e793e6a11c140701d045a..ae50db063b07eb3463f3cfcdd7cee361327eb131 100644
+--- a/third_party/blink/renderer/modules/webaudio/analyser_node.idl
++++ b/third_party/blink/renderer/modules/webaudio/analyser_node.idl
+@@ -40,10 +40,10 @@
+ 
+     // Copies the current frequency data into the passed array.
+     // If the array has fewer elements than the frequencyBinCount, the excess elements will be dropped.
+-    [Measure] void getFloatFrequencyData(Float32Array array);
+-    [Measure] void getByteFrequencyData(Uint8Array array);
++    [Measure, CallWith=ScriptState] void getFloatFrequencyData(Float32Array array);
++    [Measure, CallWith=ScriptState] void getByteFrequencyData(Uint8Array array);
+ 
+     // Real-time waveform data
+-    [Measure] void getFloatTimeDomainData(Float32Array array);
+-    [Measure] void getByteTimeDomainData(Uint8Array array);
++    [Measure, CallWith=ScriptState] void getFloatTimeDomainData(Float32Array array);
++    [Measure, CallWith=ScriptState] void getByteTimeDomainData(Uint8Array array);
+ };
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+index 40a355dec4aad8d39567c404619959c0347b2ad6..3dd647bc695da263dcf56c60358e3c496e9d2ce0 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -32,12 +32,17 @@
+ 
+ #include "base/compiler_specific.h"
+ #include "base/containers/span.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_buffer_options.h"
+ #include "third_party/blink/renderer/modules/webaudio/base_audio_context.h"
+ #include "third_party/blink/renderer/platform/audio/audio_bus.h"
+ #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+ 
+ namespace blink {
+@@ -201,6 +206,7 @@ AudioBuffer::AudioBuffer(AudioBus* bus)
+ }
+ 
+ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(
++    ScriptState* script_state,
+     unsigned channel_index,
+     ExceptionState& exception_state) {
+   if (channel_index >= channels_.size()) {
+@@ -212,7 +218,31 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(
+     return NotShared<DOMFloat32Array>(nullptr);
+   }
+ 
+-  return getChannelData(channel_index);
++  NotShared<DOMFloat32Array> result = getChannelData(channel_index);
++
++  if (!script_state || !script_state->ContextIsValid() || !result.Get()) {
++    return result;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "audioBuffer", "getChannelDataOverride");
++  if (override_fn.IsEmpty()) {
++    return result;
++  }
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      ToV8Traits<DOMFloat32Array>::ToV8(script_state, result.Get())};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn,
++      ExecutionContext::From(script_state), context->Global(), 1, argv, isolate);
++
++  return result;
+ }
+ 
+ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(unsigned channel_index) {
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.h b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+index 2e798e3e5bae783d2abca6c9b1301e933187b97a..976129ad9f2305870bed3e837cbce88ef9c72d8a 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.h
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.h
+@@ -88,7 +88,8 @@ class MODULES_EXPORT AudioBuffer final : public ScriptWrappable {
+ 
+   // Channel data access
+   unsigned numberOfChannels() const { return channels_.size(); }
+-  NotShared<DOMFloat32Array> getChannelData(unsigned channel_index,
++  NotShared<DOMFloat32Array> getChannelData(ScriptState*,
++                                            unsigned channel_index,
+                                             ExceptionState&);
+   NotShared<DOMFloat32Array> getChannelData(unsigned channel_index);
+   void copyFromChannel(NotShared<DOMFloat32Array>,
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.idl b/third_party/blink/renderer/modules/webaudio/audio_buffer.idl
+index 48bf56bf8254266341f57c9636dd7ea4e0fb9dc2..c9ed37628c7001dff8b573f5c30564232e7c0845 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.idl
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.idl
+@@ -37,7 +37,7 @@
+ 
+     // Channel access
+     readonly attribute unsigned long numberOfChannels;
+-    [Measure, RaisesException] Float32Array getChannelData(
++    [Measure, RaisesException, CallWith=ScriptState] Float32Array getChannelData(
+         unsigned long channelIndex);
+     [Measure, RaisesException] void copyFromChannel(
+         Float32Array destination,
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_context.cc b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+index 8215703f8d18f2f5ccfabbe5f0fbc2215331e09d..6c3219746172cd8559c2e3c373b1968a3ded2cf5 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.cc
+@@ -23,6 +23,9 @@
+ #include "third_party/blink/public/platform/modules/webrtc/webrtc_logging.h"
+ #include "third_party/blink/public/platform/web_audio_latency_hint.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_throw_dom_exception.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_context_options.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_audio_timestamp.h"
+@@ -917,21 +920,82 @@ void AudioContext::SetVolumeMultiplier(double multiplier) {
+   volume_multiplier_ = multiplier;
+ }
+ 
+-double AudioContext::baseLatency() const {
++double AudioContext::baseLatency(ScriptState* script_state) const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(main_thread_sequence_checker_);
+   DCHECK(destination());
+ 
+-  return base_latency_;
++  double value = base_latency_;
++
++  if (!script_state || !script_state->ContextIsValid()) {
++    return value;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "audioContext", "baseLatencyOverride");
++  if (override_fn.IsEmpty()) {
++    return value;
++  }
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Number::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn,
++           ExecutionContext::From(script_state), context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result)) {
++    return value;
++  }
++
++  if (override_result->IsNumber()) {
++    return override_result.As<v8::Number>()->Value();
++  }
++  return value;
+ }
+ 
+-double AudioContext::outputLatency() const {
++double AudioContext::outputLatency(ScriptState* script_state) const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(main_thread_sequence_checker_);
+   DCHECK(destination());
+ 
+   DeferredTaskHandler::GraphAutoLocker locker(this);
+ 
+   double factor = GetOutputLatencyQuantizingFactor();
+-  return std::round(output_position_.hardware_output_latency / factor) * factor;
++  double value =
++      std::round(output_position_.hardware_output_latency / factor) * factor;
++
++  if (!script_state || !script_state->ContextIsValid()) {
++    return value;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "audioContext", "outputLatencyOverride");
++  if (override_fn.IsEmpty()) {
++    return value;
++  }
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Number::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn,
++           ExecutionContext::From(script_state), context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result)) {
++    return value;
++  }
++
++  if (override_result->IsNumber()) {
++    return override_result.As<v8::Number>()->Value();
++  }
++  return value;
+ }
+ 
+ AudioPlayoutStats* AudioContext::playoutStats() {
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_context.h b/third_party/blink/renderer/modules/webaudio/audio_context.h
+index c8f14bc84b21ffa63500d15264edca61e22edf4d..231bdf78845b9e14ca800d31a72555e3d96e28a8 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.h
+@@ -183,8 +183,8 @@ class MODULES_EXPORT AudioContext final
+           auto_picture_in_picture_info) override {}
+ 
+   // https://webaudio.github.io/web-audio-api/#AudioContext
+-  double baseLatency() const;
+-  double outputLatency() const;
++  double baseLatency(ScriptState*) const;
++  double outputLatency(ScriptState*) const;
+   V8UnionAudioSinkInfoOrString* sinkId() const { return v8_sink_id_.Get(); }
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(sinkchange, kSinkchange)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(error, kError)
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_context.idl b/third_party/blink/renderer/modules/webaudio/audio_context.idl
+index bd27efb2a4564337c3fe75fc16d35619bd2fe465..c5f1b8326f9ef13d4fd63edebb8aaa159fff7654 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_context.idl
++++ b/third_party/blink/renderer/modules/webaudio/audio_context.idl
+@@ -40,8 +40,8 @@ dictionary AudioSinkOptions {
+     ActiveScriptWrappable
+ ] interface AudioContext : BaseAudioContext {
+     [CallWith=ExecutionContext, RaisesException, Measure] constructor(optional AudioContextOptions contextOptions = {});
+-    [MeasureAs=AudioContextBaseLatency] readonly attribute double baseLatency;
+-    [MeasureAs=AudioContextOutputLatency] readonly attribute double outputLatency;
++    [MeasureAs=AudioContextBaseLatency, CallWith=ScriptState] readonly attribute double baseLatency;
++    [MeasureAs=AudioContextOutputLatency, CallWith=ScriptState] readonly attribute double outputLatency;
+     [MeasureAs=AudioContextSinkId, SecureContext] readonly attribute (DOMString or AudioSinkInfo) sinkId;
+     [SecureContext] attribute EventHandler onsinkchange;
+     attribute EventHandler onerror;
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_context_test.cc b/third_party/blink/renderer/modules/webaudio/audio_context_test.cc
+index 332ce78362220ae9a758c2225a5655a28d3be9d5..c4002d3b6426b77d34f8ee250a57e126e912af81 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_context_test.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_context_test.cc
+@@ -388,8 +388,8 @@ TEST_F(AudioContextTest, AudioContextOptions_WebAudioLatencyHint) {
+               V8AudioContextLatencyCategory::Enum::kBalanced)));
+   AudioContext* balanced_context = AudioContext::Create(
+       GetFrame().DomWindow(), balanced_options, ASSERT_NO_EXCEPTION);
+-  EXPECT_GT(balanced_context->baseLatency(),
+-            interactive_context->baseLatency());
++  EXPECT_GT(balanced_context->baseLatency(nullptr),
++            interactive_context->baseLatency(nullptr));
+ 
+   AudioContextOptions* playback_options = AudioContextOptions::Create();
+   playback_options->setLatencyHint(
+@@ -398,19 +398,19 @@ TEST_F(AudioContextTest, AudioContextOptions_WebAudioLatencyHint) {
+               V8AudioContextLatencyCategory::Enum::kPlayback)));
+   AudioContext* playback_context = AudioContext::Create(
+       GetFrame().DomWindow(), playback_options, ASSERT_NO_EXCEPTION);
+-  EXPECT_GT(playback_context->baseLatency(), balanced_context->baseLatency());
++  EXPECT_GT(playback_context->baseLatency(nullptr), balanced_context->baseLatency(nullptr));
+ 
+   AudioContextOptions* exact_too_small_options = AudioContextOptions::Create();
+   exact_too_small_options->setLatencyHint(
+       MakeGarbageCollected<V8UnionAudioContextLatencyCategoryOrDouble>(
+-          interactive_context->baseLatency() / 2));
++          interactive_context->baseLatency(nullptr) / 2));
+   AudioContext* exact_too_small_context = AudioContext::Create(
+       GetFrame().DomWindow(), exact_too_small_options, ASSERT_NO_EXCEPTION);
+-  EXPECT_EQ(exact_too_small_context->baseLatency(),
+-            interactive_context->baseLatency());
++  EXPECT_EQ(exact_too_small_context->baseLatency(nullptr),
++            interactive_context->baseLatency(nullptr));
+ 
+   const double exact_latency_sec =
+-      (interactive_context->baseLatency() + playback_context->baseLatency()) /
++      (interactive_context->baseLatency(nullptr) + playback_context->baseLatency(nullptr)) /
+       2;
+   AudioContextOptions* exact_ok_options = AudioContextOptions::Create();
+   exact_ok_options->setLatencyHint(
+@@ -418,16 +418,16 @@ TEST_F(AudioContextTest, AudioContextOptions_WebAudioLatencyHint) {
+           exact_latency_sec));
+   AudioContext* exact_ok_context = AudioContext::Create(
+       GetFrame().DomWindow(), exact_ok_options, ASSERT_NO_EXCEPTION);
+-  EXPECT_EQ(exact_ok_context->baseLatency(), exact_latency_sec);
++  EXPECT_EQ(exact_ok_context->baseLatency(nullptr), exact_latency_sec);
+ 
+   AudioContextOptions* exact_too_big_options = AudioContextOptions::Create();
+   exact_too_big_options->setLatencyHint(
+       MakeGarbageCollected<V8UnionAudioContextLatencyCategoryOrDouble>(
+-          playback_context->baseLatency() * 2));
++          playback_context->baseLatency(nullptr) * 2));
+   AudioContext* exact_too_big_context = AudioContext::Create(
+       GetFrame().DomWindow(), exact_too_big_options, ASSERT_NO_EXCEPTION);
+-  EXPECT_EQ(exact_too_big_context->baseLatency(),
+-            playback_context->baseLatency());
++  EXPECT_EQ(exact_too_big_context->baseLatency(nullptr),
++            playback_context->baseLatency(nullptr));
+ }
+ 
+ TEST_F(AudioContextTest, AudioContextAudibility_ServiceUnbind) {
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+index 586fcb5a0e898256dfb7eb3b0044612cd2436cc3..8535ab9e877a30326f8c3da70a0c97557193d54f 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+@@ -36,6 +36,9 @@
+ #include "third_party/blink/public/platform/task_type.h"
+ #include "third_party/blink/renderer/bindings/core/v8/dictionary.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_periodic_wave_constraints.h"
+ #include "third_party/blink/renderer/core/dom/dom_exception.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+@@ -295,7 +298,8 @@ void BaseAudioContext::WarnForConnectionIfContextClosed() const {
+   }
+ }
+ 
+-AudioBuffer* BaseAudioContext::createBuffer(uint32_t number_of_channels,
++AudioBuffer* BaseAudioContext::createBuffer(ScriptState* script_state,
++                                            uint32_t number_of_channels,
+                                             uint32_t number_of_frames,
+                                             float sample_rate,
+                                             ExceptionState& exception_state) {
+@@ -339,6 +343,28 @@ AudioBuffer* BaseAudioContext::createBuffer(uint32_t number_of_channels,
+     }
+   }
+ 
++  if (!buffer || !script_state || !script_state->ContextIsValid()) {
++    return buffer;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "baseAudioContext", "createBufferOverride");
++  if (override_fn.IsEmpty()) {
++    return buffer;
++  }
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      ToV8Traits<AudioBuffer>::ToV8(script_state, buffer)};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn,
++      ExecutionContext::From(script_state), context->Global(), 1, argv, isolate);
++
+   return buffer;
+ }
+ 
+@@ -573,17 +599,68 @@ ConvolverNode* BaseAudioContext::createConvolver(
+ }
+ 
+ DynamicsCompressorNode* BaseAudioContext::createDynamicsCompressor(
++    ScriptState* script_state,
+     ExceptionState& exception_state) {
+   DCHECK(IsMainThread());
+ 
+-  return DynamicsCompressorNode::Create(*this, exception_state);
++  DynamicsCompressorNode* node =
++      DynamicsCompressorNode::Create(*this, exception_state);
++
++  if (!node || !script_state || !script_state->ContextIsValid()) {
++    return node;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "baseAudioContext", "createDynamicsCompressorOverride");
++  if (override_fn.IsEmpty()) {
++    return node;
++  }
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      ToV8Traits<DynamicsCompressorNode>::ToV8(script_state, node)};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn,
++      ExecutionContext::From(script_state), context->Global(), 1, argv, isolate);
++
++  return node;
+ }
+ 
+ AnalyserNode* BaseAudioContext::createAnalyser(
++    ScriptState* script_state,
+     ExceptionState& exception_state) {
+   DCHECK(IsMainThread());
+ 
+-  return AnalyserNode::Create(*this, exception_state);
++  AnalyserNode* node = AnalyserNode::Create(*this, exception_state);
++
++  if (!node || !script_state || !script_state->ContextIsValid()) {
++    return node;
++  }
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "baseAudioContext", "createAnalyserOverride");
++  if (override_fn.IsEmpty()) {
++    return node;
++  }
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      ToV8Traits<AnalyserNode>::ToV8(script_state, node)};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn,
++      ExecutionContext::From(script_state), context->Global(), 1, argv, isolate);
++
++  return node;
+ }
+ 
+ GainNode* BaseAudioContext::createGain(ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.h b/third_party/blink/renderer/modules/webaudio/base_audio_context.h
+index aead235c2479acece08bf6c8caf17bf322068942..101bdc59ce6bbe32652767d7c369d6bf07586309 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.h
+@@ -125,9 +125,10 @@ class MODULES_EXPORT BaseAudioContext
+   }
+   AudioWorklet* audioWorklet() const;
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(statechange, kStatechange)
+-  AnalyserNode* createAnalyser(ExceptionState&);
++  AnalyserNode* createAnalyser(ScriptState*, ExceptionState&);
+   BiquadFilterNode* createBiquadFilter(ExceptionState&);
+-  AudioBuffer* createBuffer(uint32_t number_of_channels,
++  AudioBuffer* createBuffer(ScriptState*,
++                            uint32_t number_of_channels,
+                             uint32_t number_of_frames,
+                             float sample_rate,
+                             ExceptionState&);
+@@ -142,7 +143,7 @@ class MODULES_EXPORT BaseAudioContext
+   ConvolverNode* createConvolver(ExceptionState&);
+   DelayNode* createDelay(ExceptionState&);
+   DelayNode* createDelay(double max_delay_time, ExceptionState&);
+-  DynamicsCompressorNode* createDynamicsCompressor(ExceptionState&);
++  DynamicsCompressorNode* createDynamicsCompressor(ScriptState*, ExceptionState&);
+   GainNode* createGain(ExceptionState&);
+   IIRFilterNode* createIIRFilter(Vector<double> feedforward_coef,
+                                  Vector<double> feedback_coef,
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.idl b/third_party/blink/renderer/modules/webaudio/base_audio_context.idl
+index 56f00eec5cfa51a8a92ecb2922e02461b2a5e9e1..4f5c604691195689487bb9df45ee2ec931490544 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.idl
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.idl
+@@ -26,16 +26,16 @@ callback DecodeSuccessCallback = void (AudioBuffer decodedData);
+     [SecureContext] readonly attribute AudioWorklet audioWorklet;
+     attribute EventHandler onstatechange;
+ 
+-    [RaisesException, MeasureAs=AudioContextCreateAnalyser] AnalyserNode createAnalyser();
++    [RaisesException, MeasureAs=AudioContextCreateAnalyser, CallWith=ScriptState] AnalyserNode createAnalyser();
+     [RaisesException, MeasureAs=AudioContextCreateBiquadFilter] BiquadFilterNode createBiquadFilter();
+-    [RaisesException] AudioBuffer createBuffer(unsigned long numberOfChannels, unsigned long numberOfFrames, float sampleRate);
++    [RaisesException, CallWith=ScriptState] AudioBuffer createBuffer(unsigned long numberOfChannels, unsigned long numberOfFrames, float sampleRate);
+     [RaisesException, MeasureAs=AudioContextCreateBufferSource] AudioBufferSourceNode createBufferSource();
+     [RaisesException, MeasureAs=AudioContextCreateChannelMerger] ChannelMergerNode createChannelMerger(optional unsigned long numberOfInputs);
+     [RaisesException, MeasureAs=AudioContextCreateChannelSplitter] ChannelSplitterNode createChannelSplitter(optional unsigned long numberOfOutputs);
+     [RaisesException, MeasureAs=AudioContextCreateConstantSource] ConstantSourceNode createConstantSource();
+     [RaisesException, MeasureAs=AudioContextCreateConvolver] ConvolverNode createConvolver();
+     [RaisesException, MeasureAs=AudioContextCreateDelay] DelayNode createDelay(optional double maxDelayTime);
+-    [RaisesException, MeasureAs=AudioContextCreateDynamicsCompressor] DynamicsCompressorNode createDynamicsCompressor();
++    [RaisesException, MeasureAs=AudioContextCreateDynamicsCompressor, CallWith=ScriptState] DynamicsCompressorNode createDynamicsCompressor();
+     [RaisesException, MeasureAs=AudioContextCreateGain] GainNode createGain();
+     [RaisesException, MeasureAs=AudioContextCreateIIRFilter] IIRFilterNode createIIRFilter(sequence<double> feedForward, sequence<double> feedBack);
+     [RaisesException, MeasureAs=AudioContextCreateOscillator] OscillatorNode createOscillator();
+diff --git a/third_party/blink/renderer/modules/webaudio/dynamics_compressor_node_test.cc b/third_party/blink/renderer/modules/webaudio/dynamics_compressor_node_test.cc
+index f4ac8b8372224aca77aabba2bcef2120c523152b..6d7602daf36d3601a7acd8d1537d3053e37c7b61 100644
+--- a/third_party/blink/renderer/modules/webaudio/dynamics_compressor_node_test.cc
++++ b/third_party/blink/renderer/modules/webaudio/dynamics_compressor_node_test.cc
+@@ -22,7 +22,7 @@ TEST(DynamicsCompressorNodeTest, ProcessorLifetime) {
+   OfflineAudioContext* context = OfflineAudioContext::Create(
+       page->GetFrame().DomWindow(), 2, 1, 48000, ASSERT_NO_EXCEPTION);
+   DynamicsCompressorNode* node =
+-      context->createDynamicsCompressor(ASSERT_NO_EXCEPTION);
++      context->createDynamicsCompressor(nullptr, ASSERT_NO_EXCEPTION);
+   DynamicsCompressorHandler& handler = node->GetDynamicsCompressorHandler();
+   EXPECT_TRUE(handler.dynamics_compressor_);
+   DeferredTaskHandler::GraphAutoLocker locker(context);
+diff --git a/third_party/blink/renderer/platform/bindings/custom_override_helpers.h b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f1ea2cd26dbecdbdf97bbf2123bf3336ccf775f
+--- /dev/null
++++ b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+@@ -0,0 +1,55 @@
++// Copyright 2024 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_CUSTOM_OVERRIDE_HELPERS_H_
++#define THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_CUSTOM_OVERRIDE_HELPERS_H_
++
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
++#include "v8/include/v8.h"
++
++namespace blink {
++
++// Looks up a custom override function from the global customOverrides object.
++// Path: window.customOverrides.{interface_key}.{override_name}
++// Returns the function if found, or an empty handle if not.
++// IMPORTANT: Caller must have an active v8::HandleScope.
++inline v8::Local<v8::Function> GetCustomOverrideFunction(
++    ScriptState* script_state,
++    const char* interface_key,
++    const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return v8::Local<v8::Function>();
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Object> global = context->Global();
++
++  v8::Local<v8::Value> custom_overrides;
++  if (!global
++           ->Get(context, V8AtomicString(isolate, "customOverrides"))
++           .ToLocal(&custom_overrides) ||
++      !custom_overrides->IsObject())
++    return v8::Local<v8::Function>();
++
++  v8::Local<v8::Value> iface;
++  if (!custom_overrides.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, interface_key))
++           .ToLocal(&iface) ||
++      !iface->IsObject())
++    return v8::Local<v8::Function>();
++
++  v8::Local<v8::Value> fn;
++  if (!iface.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, override_name))
++           .ToLocal(&fn) ||
++      !fn->IsFunction())
++    return v8::Local<v8::Function>();
++
++  return fn.As<v8::Function>();
++}
++
++}  // namespace blink
++
++#endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_CUSTOM_OVERRIDE_HELPERS_H_

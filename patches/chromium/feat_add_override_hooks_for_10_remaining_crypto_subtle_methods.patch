@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Fri, 6 Feb 2026 20:19:12 +0530
+Subject: feat: add override hooks for 10 remaining crypto.subtle methods
+
+Add MaybeSubtleCryptoOverride<T> template helper and override checks
+for decrypt, sign, verify, digest, generateKey, importKey, exportKey,
+wrapKey, deriveBits, and deriveKey via window.customOverrides.subtleCrypto.
+
+diff --git a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
+index 482444a487235ea66988cd24b3c32c945e89f3fb..fa54ccd5b7156d7e1d06366b823df40d51255c0b 100644
+--- a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
++++ b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
+@@ -30,6 +30,8 @@
+ 
+ #include "third_party/blink/renderer/modules/crypto/subtle_crypto.h"
+ 
++#include <optional>
++
+ #include "base/check_deref.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "third_party/blink/public/platform/platform.h"
+@@ -115,6 +117,49 @@ bool ParseJsonWebKey(const JsonWebKey& key, std::vector<uint8_t>& json_utf8) {
+   return true;
+ }
+ 
++template <typename T>
++std::optional<ScriptPromise<T>> MaybeSubtleCryptoOverride(
++    ScriptState* script_state,
++    const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return std::nullopt;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "subtleCrypto", override_name);
++  if (override_fn.IsEmpty())
++    return std::nullopt;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 0, nullptr, isolate)
++           .ToLocal(&override_result)) {
++    if (try_catch.HasCaught()) {
++      v8::Local<v8::Promise::Resolver> v8_resolver;
++      if (v8::Promise::Resolver::New(context).ToLocal(&v8_resolver)) {
++        v8_resolver->Reject(context, try_catch.Exception()).Check();
++        return ScriptPromise<T>::FromV8Promise(
++            isolate, v8_resolver->GetPromise());
++      }
++    }
++    return std::nullopt;
++  }
++
++  v8::Local<v8::Promise::Resolver> v8_resolver;
++  if (v8::Promise::Resolver::New(context).ToLocal(&v8_resolver)) {
++    v8_resolver->Resolve(context, override_result).Check();
++    return ScriptPromise<T>::FromV8Promise(
++        isolate, v8_resolver->GetPromise());
++  }
++  return std::nullopt;
++}
++
+ }  // namespace
+ 
+ SubtleCrypto::SubtleCrypto() = default;
+@@ -205,6 +250,10 @@ ScriptPromise<IDLAny> SubtleCrypto::decrypt(
+     CryptoKey* key,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "decryptOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-decrypt
+ 
+@@ -253,6 +302,10 @@ ScriptPromise<IDLAny> SubtleCrypto::sign(
+     CryptoKey* key,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "signOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-sign
+ 
+@@ -302,6 +355,10 @@ ScriptPromise<IDLAny> SubtleCrypto::verifySignature(
+     const V8BufferSource* raw_signature,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "verifyOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-verify
+ 
+@@ -353,6 +410,10 @@ ScriptPromise<IDLAny> SubtleCrypto::digest(
+     const V8AlgorithmIdentifier* raw_algorithm,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "digestOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-digest
+ 
+@@ -390,6 +451,10 @@ ScriptPromise<IDLAny> SubtleCrypto::generateKey(
+     bool extractable,
+     const Vector<String>& raw_key_usages,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "generateKeyOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-generateKey
+ 
+@@ -436,6 +501,10 @@ ScriptPromise<CryptoKey> SubtleCrypto::importKey(
+     bool extractable,
+     const Vector<String>& raw_key_usages,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<CryptoKey>(script_state, "importKeyOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-importKey
+   WebCryptoKeyFormat format;
+@@ -526,6 +595,10 @@ ScriptPromise<IDLAny> SubtleCrypto::exportKey(ScriptState* script_state,
+                                               const String& raw_format,
+                                               CryptoKey* key,
+                                               ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "exportKeyOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-exportKey
+ 
+@@ -563,6 +636,10 @@ ScriptPromise<IDLAny> SubtleCrypto::wrapKey(
+     CryptoKey* wrapping_key,
+     const V8AlgorithmIdentifier* raw_wrap_algorithm,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "wrapKeyOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-wrapKey
+ 
+@@ -717,6 +794,10 @@ ScriptPromise<DOMArrayBuffer> SubtleCrypto::deriveBits(
+     CryptoKey* base_key,
+     std::optional<unsigned> length_bits,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<DOMArrayBuffer>(script_state, "deriveBitsOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-deriveBits
+ 
+@@ -764,6 +845,10 @@ ScriptPromise<IDLAny> SubtleCrypto::deriveKey(
+     bool extractable,
+     const Vector<String>& raw_key_usages,
+     ExceptionState& exception_state) {
++  // Check for override
++  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "deriveKeyOverride"))
++    return *ovr;
++
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-deriveKey
+ 
