@@ -1,0 +1,83 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 00:26:21 +0530
+Subject: Add Date override hooks (Batch 16: 10 APIs)
+
+Date.now, Date.parse, Date.UTC (static) + toString,
+toTimeString, toDateString, getTimezoneOffset, toLocaleString,
+toLocaleDateString, toLocaleTimeString (prototype)
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 0b28acb58be03003c4c616d8a080bd92613a9e70..d5fd8c7a35ee3027081082b66cd3d2f6209b128e 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -181,6 +181,61 @@ void InstallMathOverrides(v8::Isolate* isolate,
+   }
+ }
+ 
++// Install Date function overrides.
++void InstallDateOverrides(v8::Isolate* isolate,
++                          v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Value> date_val;
++  if (!global->Get(context, V8AtomicString(isolate, "Date"))
++           .ToLocal(&date_val) ||
++      !date_val->IsFunction()) {
++    return;
++  }
++  v8::Local<v8::Object> date = date_val.As<v8::Object>();
++
++  // Static methods on Date itself.
++  static const struct {
++    const char* fn_name;
++    const char* override_name;
++  } kDateStaticFns[] = {
++      {"now", "nowOverride"},
++      {"parse", "parseOverride"},
++      {"UTC", "utcOverride"},
++  };
++
++  for (const auto& fn : kDateStaticFns) {
++    WrapFunctionOnObject(isolate, context, date, fn.fn_name, "date",
++                         fn.override_name);
++  }
++
++  // Prototype methods on Date.prototype.
++  v8::Local<v8::Value> proto_val;
++  if (!date->Get(context, V8AtomicString(isolate, "prototype"))
++           .ToLocal(&proto_val) ||
++      !proto_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Object> proto = proto_val.As<v8::Object>();
++
++  static const struct {
++    const char* fn_name;
++    const char* override_name;
++  } kDateProtoFns[] = {
++      {"toString", "toStringOverride"},
++      {"toTimeString", "toTimeStringOverride"},
++      {"toDateString", "toDateStringOverride"},
++      {"getTimezoneOffset", "getTimezoneOffsetOverride"},
++      {"toLocaleString", "toLocaleStringOverride"},
++      {"toLocaleDateString", "toLocaleDateStringOverride"},
++      {"toLocaleTimeString", "toLocaleTimeStringOverride"},
++  };
++
++  for (const auto& fn : kDateProtoFns) {
++    WrapFunctionOnObject(isolate, context, proto, fn.fn_name, "date",
++                         fn.override_name);
++  }
++}
++
+ }  // namespace
+ 
+ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+@@ -191,6 +246,7 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+   v8::Local<v8::Context> context = script_state->GetContext();
+ 
+   InstallMathOverrides(isolate, context);
++  InstallDateOverrides(isolate, context);
+ }
+ 
+ }  // namespace blink
