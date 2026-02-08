@@ -1,0 +1,948 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 10:02:45 +0530
+Subject: feat: add override hooks for 11 APIs (Batch 9)
+
+WebGL: getParameter, getExtension, getShaderPrecisionFormat
+WebGL2: getInternalformatParameter, getIndexedParameter, getTransformFeedbackVarying
+OffscreenCanvas: transferToImageBitmap
+Window: matchMedia, getComputedStyle
+MediaStreamTrack: getCapabilities, getSettings
+
+Also adds ForBinding wrappers to WebGLRenderingContextWebGPUBase.
+
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 428b6d4638ea9ad52238ed86bd0fae24bd71751a..3dfc01350435dd08c3b4346dc7871edd1448b0b3 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -1085,6 +1085,32 @@ MediaQueryList* LocalDOMWindow::matchMedia(const String& media) {
+   return document()->GetMediaQueryMatcher().MatchMedia(media);
+ }
+ 
++MediaQueryList* LocalDOMWindow::matchMediaForBinding(ScriptState* script_state,
++                                                     const String& media) {
++  MediaQueryList* result = matchMedia(media);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "window", "matchMediaOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<MediaQueryList>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ void LocalDOMWindow::FrameDestroyed() {
+   TRACE_EVENT0("navigation", "LocalDOMWindow::FrameDestroyed");
+   base::ScopedUmaHistogramTimer histogram_timer(
+@@ -1914,6 +1940,35 @@ CSSStyleDeclaration* LocalDOMWindow::getComputedStyle(
+                                                            pseudo_elt);
+ }
+ 
++CSSStyleDeclaration* LocalDOMWindow::getComputedStyleForBinding(
++    ScriptState* script_state,
++    Element* elt,
++    const String& pseudo_elt) const {
++  CSSStyleDeclaration* result = getComputedStyle(elt, pseudo_elt);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "window",
++                                "getComputedStyleOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<CSSStyleDeclaration>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ double LocalDOMWindow::devicePixelRatio() const {
+   if (!GetFrame())
+     return 0.0;
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.h b/third_party/blink/renderer/core/frame/local_dom_window.h
+index a86d10c67c0936ea22fb139c2fd0d214f5ec48ab..393ddd6ebfe3e564670d482c57c288a1c038dfc0 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.h
++++ b/third_party/blink/renderer/core/frame/local_dom_window.h
+@@ -410,11 +410,16 @@ class CORE_EXPORT LocalDOMWindow final : public DOMWindow,
+   void resizeTo(int width, int height, ExceptionState&) const;
+ 
+   MediaQueryList* matchMedia(const String&);
++  MediaQueryList* matchMediaForBinding(ScriptState*, const String&);
+ 
+   // DOM Level 2 Style Interface
+   CSSStyleDeclaration* getComputedStyle(
+       Element*,
+       const String& pseudo_elt = String()) const;
++  CSSStyleDeclaration* getComputedStyleForBinding(
++      ScriptState*,
++      Element*,
++      const String& pseudo_elt = String()) const;
+ 
+   // WebKit animation extensions
+   int requestAnimationFrame(V8FrameRequestCallback*);
+diff --git a/third_party/blink/renderer/core/frame/window.idl b/third_party/blink/renderer/core/frame/window.idl
+index da96511e9f084691c3a04c04a589c8e9fe291590..216eac862e9dccbfe05fb094394fbd6ed549aa7b 100644
+--- a/third_party/blink/renderer/core/frame/window.idl
++++ b/third_party/blink/renderer/core/frame/window.idl
+@@ -113,11 +113,11 @@
+ 
+     // CSS Object Model (CSSOM)
+     // https://drafts.csswg.org/cssom/#extensions-to-the-window-interface
+-    [Affects=Nothing, NewObject] CSSStyleDeclaration getComputedStyle(Element elt, optional DOMString? pseudoElt);
++    [Affects=Nothing, NewObject, CallWith=ScriptState, ImplementedAs=getComputedStyleForBinding] CSSStyleDeclaration getComputedStyle(Element elt, optional DOMString? pseudoElt);
+ 
+     // CSSOM View Module
+     // https://drafts.csswg.org/cssom-view/#extensions-to-the-window-interface
+-    [Measure, NewObject] MediaQueryList matchMedia(DOMString query);
++    [Measure, NewObject, CallWith=ScriptState, ImplementedAs=matchMediaForBinding] MediaQueryList matchMedia(DOMString query);
+     [SameObject, Replaceable] readonly attribute Screen screen;
+ 
+     // browsing context
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+index 85dfe906681703e946cd8c442f858f3968796707..031ecfad32b5694cac1e83ff293e58b2af4e2563 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+@@ -12,6 +12,8 @@
+ #include "base/task/single_thread_task_runner.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/css/css_font_selector.h"
+ #include "third_party/blink/renderer/core/css/offscreen_font_selector.h"
+ #include "third_party/blink/renderer/core/css/style_engine.h"
+@@ -32,6 +34,7 @@
+ #include "third_party/blink/renderer/core/inspector/console_message.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/workers/dedicated_worker_global_scope.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/fonts/plain_text_painter.h"
+ #include "third_party/blink/renderer/platform/graphics/canvas_resource.h"
+@@ -230,6 +233,34 @@ ImageBitmap* OffscreenCanvas::transferToImageBitmap(
+   return image;
+ }
+ 
++ImageBitmap* OffscreenCanvas::transferToImageBitmapForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  ImageBitmap* result = transferToImageBitmap(script_state, exception_state);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "offscreenCanvas",
++                                "transferToImageBitmapOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<ImageBitmap>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ scoped_refptr<Image> OffscreenCanvas::GetSourceImageForCanvas(
+     SourceImageStatus* status,
+     const gfx::SizeF& size) {
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h
+index 98c491bd061d710ef2d8f3f68c2657c6317e1b01..c47fae20f87ab17661b8df97e3f2dca3b42d8c3c 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h
+@@ -60,6 +60,7 @@ class CORE_EXPORT OffscreenCanvas final
+ 
+   // API Methods
+   ImageBitmap* transferToImageBitmap(ScriptState*, ExceptionState&);
++  ImageBitmap* transferToImageBitmapForBinding(ScriptState*, ExceptionState&);
+ 
+   // For deferred canvases this will have the side effect of drawing recorded
+   // commands in order to finalize the frame.
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl
+index 86a8bf25ac8afcb4e4c73e7ea60ca7421f3245f1..cbcd4223ee8ed91a16b844aa95156b3d102e30b8 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl
+@@ -12,7 +12,7 @@
+     attribute [EnforceRange] unsigned long width;
+     attribute [EnforceRange] unsigned long height;
+ 
+-    [CallWith=ScriptState, MeasureAs=OffscreenCanvasTransferToImageBitmap, RaisesException] ImageBitmap transferToImageBitmap();
++    [CallWith=ScriptState, MeasureAs=OffscreenCanvasTransferToImageBitmap, RaisesException, ImplementedAs=transferToImageBitmapForBinding] ImageBitmap transferToImageBitmap();
+     [CallWith=ScriptState, MeasureAs=OffscreenCanvasConvertToBlob, RaisesException] Promise<Blob> convertToBlob(optional ImageEncodeOptions options = {});
+ 
+     attribute EventHandler oncontextlost;
+diff --git a/third_party/blink/renderer/modules/mediastream/media_stream_track.cc b/third_party/blink/renderer/modules/mediastream/media_stream_track.cc
+index 7adbbe68b8d7c0e75f5279a110c16eff8f57ccad..4a42d7324f5a0874c432a9323ae77352489bfb81 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_stream_track.cc
++++ b/third_party/blink/renderer/modules/mediastream/media_stream_track.cc
+@@ -4,14 +4,20 @@
+ 
+ #include "third_party/blink/renderer/modules/mediastream/media_stream_track.h"
+ 
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_media_stream_constraints.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_media_stream_track_state.h"
++#include "third_party/blink/renderer/bindings/modules/v8/v8_media_track_capabilities.h"
++#include "third_party/blink/renderer/bindings/modules/v8/v8_media_track_settings.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/modules/mediastream/media_constraints_impl.h"
+ #include "third_party/blink/renderer/modules/mediastream/media_stream_track_video_stats.h"
+ #include "third_party/blink/renderer/modules/mediastream/transferred_media_stream_track.h"
+ #include "third_party/blink/renderer/modules/mediastream/user_media_client.h"
+ #include "third_party/blink/renderer/modules/mediastream/user_media_request.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -130,6 +136,60 @@ MediaStreamTrack* MediaStreamTrack::FromTransferredState(
+   return track;
+ }
+ 
++MediaTrackCapabilities* MediaStreamTrack::getCapabilitiesForBinding(
++    ScriptState* script_state) const {
++  MediaTrackCapabilities* result = getCapabilities();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "mediaStreamTrack",
++                                "getCapabilitiesOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<MediaTrackCapabilities>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
++MediaTrackSettings* MediaStreamTrack::getSettingsForBinding(
++    ScriptState* script_state) const {
++  MediaTrackSettings* result = getSettings();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "mediaStreamTrack",
++                                "getSettingsOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<MediaTrackSettings>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ // static
+ MediaStreamTrack::FromTransferredStateImplForTesting&
+ MediaStreamTrack::GetFromTransferredStateImplForTesting() {
+diff --git a/third_party/blink/renderer/modules/mediastream/media_stream_track.h b/third_party/blink/renderer/modules/mediastream/media_stream_track.h
+index d42e3d35373158e03f1b5dbdba72bc27c7e703a6..c09af6c870897e9b64d2bb44e4a7a04c68953182 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_stream_track.h
++++ b/third_party/blink/renderer/modules/mediastream/media_stream_track.h
+@@ -105,8 +105,10 @@ class MODULES_EXPORT MediaStreamTrack
+   virtual void stopTrack(ExecutionContext*) = 0;
+   virtual MediaStreamTrack* clone(ExecutionContext*) = 0;
+   virtual MediaTrackCapabilities* getCapabilities() const = 0;
++  MediaTrackCapabilities* getCapabilitiesForBinding(ScriptState*) const;
+   virtual MediaTrackConstraints* getConstraints() const = 0;
+   virtual MediaTrackSettings* getSettings() const = 0;
++  MediaTrackSettings* getSettingsForBinding(ScriptState*) const;
+   virtual V8UnionMediaStreamTrackAudioStatsOrMediaStreamTrackVideoStats*
+   stats() = 0;
+   virtual CaptureHandle* getCaptureHandle() const = 0;
+diff --git a/third_party/blink/renderer/modules/mediastream/media_stream_track.idl b/third_party/blink/renderer/modules/mediastream/media_stream_track.idl
+index 513bcad4ab0b1bb3ba084af636455f84c5115011..f2ee3fce0b330d5da88011c4037686240da13e2d 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_stream_track.idl
++++ b/third_party/blink/renderer/modules/mediastream/media_stream_track.idl
+@@ -51,9 +51,9 @@ enum MediaStreamTrackState {
+     [CallWith=ExecutionContext] MediaStreamTrack clone();
+     [ImplementedAs=stopTrack, CallWith=ExecutionContext] void stop();
+ 
+-    MediaTrackCapabilities getCapabilities();
++    [CallWith=ScriptState, ImplementedAs=getCapabilitiesForBinding] MediaTrackCapabilities getCapabilities();
+     MediaTrackConstraints getConstraints();
+-    MediaTrackSettings getSettings();
++    [CallWith=ScriptState, ImplementedAs=getSettingsForBinding] MediaTrackSettings getSettings();
+     // https://w3c.github.io/mediacapture-extensions/#mediastreamtrack-statistics
+     [SameObject, Measure] readonly attribute (MediaStreamTrackVideoStats or MediaStreamTrackAudioStats)? stats;
+     // https://w3c.github.io/mediacapture-handle/identity/
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+index a16140fb73c2aa81eebb80bb156394bc5c766432..a53989784bbac0d8343ab2be557180adf34a68e0 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -12,6 +12,8 @@
+ #include "base/numerics/safe_conversions.h"
+ #include "gpu/command_buffer/client/gles2_interface.h"
+ #include "third_party/blink/public/platform/web_graphics_context_3d_provider.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/webgl_any.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/dom/element.h"
+@@ -34,6 +36,8 @@
+ #include "third_party/blink/renderer/modules/webgl/webgl_transform_feedback.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_uniform_location.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_vertex_array_object.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+ 
+@@ -662,6 +666,39 @@ ScriptValue WebGL2RenderingContextBase::getInternalformatParameter(
+   }
+ }
+ 
++ScriptValue WebGL2RenderingContextBase::getInternalformatParameterForBinding(
++    ScriptState* script_state,
++    GLenum target,
++    GLenum internalformat,
++    GLenum pname) {
++  ScriptValue result =
++      getInternalformatParameter(script_state, target, internalformat, pname);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webgl2RenderingContext",
++                                "getInternalformatParameterOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {result.V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptValue(isolate, override_result);
++  }
++  return result;
++}
++
+ bool WebGL2RenderingContextBase::CheckAndTranslateAttachments(
+     const char* function_name,
+     GLenum target,
+@@ -4236,6 +4273,35 @@ WebGLActiveInfo* WebGL2RenderingContextBase::getTransformFeedbackVarying(
+       size);
+ }
+ 
++WebGLActiveInfo* WebGL2RenderingContextBase::getTransformFeedbackVaryingForBinding(
++    ScriptState* script_state,
++    WebGLProgram* program,
++    GLuint index) {
++  WebGLActiveInfo* result = getTransformFeedbackVarying(program, index);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webgl2RenderingContext",
++                                "getTransformFeedbackVaryingOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<WebGLActiveInfo>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ void WebGL2RenderingContextBase::pauseTransformFeedback() {
+   if (isContextLost())
+     return;
+@@ -4434,6 +4500,37 @@ ScriptValue WebGL2RenderingContextBase::getIndexedParameter(
+   }
+ }
+ 
++ScriptValue WebGL2RenderingContextBase::getIndexedParameterForBinding(
++    ScriptState* script_state,
++    GLenum target,
++    GLuint index) {
++  ScriptValue result = getIndexedParameter(script_state, target, index);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webgl2RenderingContext",
++                                "getIndexedParameterOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {result.V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptValue(isolate, override_result);
++  }
++  return result;
++}
++
+ std::optional<Vector<GLuint>> WebGL2RenderingContextBase::getUniformIndices(
+     WebGLProgram* program,
+     const Vector<String>& uniform_names) {
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h
+index b50684b61d0db7d1d44ecd593b64ca6d67c655b4..2d8f0e1ab81bc7a5cb134a8ae733e0ccc3435cec 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h
+@@ -73,6 +73,10 @@ class WebGL2RenderingContextBase : public WebGLRenderingContextBase {
+                        GLenum);
+   void framebufferTextureLayer(GLenum, GLenum, WebGLTexture*, GLint, GLint);
+   ScriptValue getInternalformatParameter(ScriptState*, GLenum, GLenum, GLenum);
++  ScriptValue getInternalformatParameterForBinding(ScriptState*,
++                                                   GLenum,
++                                                   GLenum,
++                                                   GLenum);
+   void invalidateFramebuffer(GLenum, const Vector<GLenum>&);
+   void invalidateSubFramebuffer(GLenum,
+                                 const Vector<GLenum>&,
+@@ -859,6 +863,9 @@ class WebGL2RenderingContextBase : public WebGLRenderingContextBase {
+   void endTransformFeedback();
+   void transformFeedbackVaryings(WebGLProgram*, const Vector<String>&, GLenum);
+   WebGLActiveInfo* getTransformFeedbackVarying(WebGLProgram*, GLuint);
++  WebGLActiveInfo* getTransformFeedbackVaryingForBinding(ScriptState*,
++                                                         WebGLProgram*,
++                                                         GLuint);
+   void pauseTransformFeedback();
+   void resumeTransformFeedback();
+   bool ValidateTransformFeedbackPrimitiveMode(const char* function_name,
+@@ -870,6 +877,7 @@ class WebGL2RenderingContextBase : public WebGLRenderingContextBase {
+   void bindBufferBase(GLenum, GLuint, WebGLBuffer*);
+   void bindBufferRange(GLenum, GLuint, WebGLBuffer*, int64_t, int64_t);
+   virtual ScriptValue getIndexedParameter(ScriptState*, GLenum, GLuint);
++  ScriptValue getIndexedParameterForBinding(ScriptState*, GLenum, GLuint);
+   std::optional<Vector<GLuint>> getUniformIndices(WebGLProgram*,
+                                                   const Vector<String>&);
+   ScriptValue getActiveUniforms(ScriptState*,
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl
+index 716699967bddb71b9a34b56c068d0d3d3d45286d..47eff182a2cf7e697abdc30ce3d1dafe341ec9b3 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl
+@@ -286,7 +286,7 @@ interface mixin WebGL2RenderingContextBase {
+     /* Framebuffer objects */
+     void blitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+     void framebufferTextureLayer(GLenum target, GLenum attachment, WebGLTexture? texture, GLint level, GLint layer);
+-    [MeasureAs=WebGL2RenderingContextGetInternalFormatParameter, CallWith=ScriptState] any getInternalformatParameter(GLenum target, GLenum internalformat, GLenum pname);
++    [MeasureAs=WebGL2RenderingContextGetInternalFormatParameter, CallWith=ScriptState, ImplementedAs=getInternalformatParameterForBinding] any getInternalformatParameter(GLenum target, GLenum internalformat, GLenum pname);
+     void invalidateFramebuffer(GLenum target, sequence<GLenum> attachments);
+     void invalidateSubFramebuffer(GLenum target, sequence<GLenum> attachments, GLint x, GLint y, GLsizei width, GLsizei height);
+     void readBuffer(GLenum mode);
+@@ -492,14 +492,14 @@ interface mixin WebGL2RenderingContextBase {
+     void beginTransformFeedback(GLenum primitiveMode);
+     void endTransformFeedback();
+     void transformFeedbackVaryings(WebGLProgram program, sequence<DOMString> varyings, GLenum bufferMode);
+-    WebGLActiveInfo? getTransformFeedbackVarying(WebGLProgram program, GLuint index);
++    [CallWith=ScriptState, ImplementedAs=getTransformFeedbackVaryingForBinding] WebGLActiveInfo? getTransformFeedbackVarying(WebGLProgram program, GLuint index);
+     void pauseTransformFeedback();
+     void resumeTransformFeedback();
+ 
+     /* Uniform Buffer Objects and Transform Feedback Buffers */
+     void bindBufferBase(GLenum target, GLuint index, WebGLBuffer? buffer);
+     void bindBufferRange(GLenum target, GLuint index, WebGLBuffer? buffer, GLintptr offset, GLsizeiptr size);
+-    [CallWith=ScriptState] any getIndexedParameter(GLenum target, GLuint index);
++    [CallWith=ScriptState, ImplementedAs=getIndexedParameterForBinding] any getIndexedParameter(GLenum target, GLuint index);
+     sequence<GLuint>? getUniformIndices(WebGLProgram program, sequence<DOMString> uniformNames);
+     [CallWith=ScriptState] any getActiveUniforms(WebGLProgram program, sequence<GLuint> uniformIndices, GLenum pname);
+     GLuint getUniformBlockIndex(WebGLProgram program, DOMString uniformBlockName);
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 57a5afa3c5901d95fb09c617a39012d42a623e78..7626d05a462de8f7f4cdff7a0652f9126ddf1492 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -57,6 +57,7 @@
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/task_type.h"
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_htmlcanvaselement_offscreencanvas.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/webgl_any.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+@@ -122,6 +123,7 @@
+ #include "third_party/blink/renderer/modules/webgl/webgl_vertex_array_object.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_vertex_array_object_oes.h"
+ #include "third_party/blink/renderer/modules/xr/xr_system.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_binding_macros.h"
+@@ -3665,6 +3667,37 @@ ScriptObject WebGLRenderingContextBase::getExtension(ScriptState* script_state,
+       ToV8Traits<IDLNullable<WebGLExtension>>::ToV8(script_state, extension));
+ }
+ 
++ScriptObject WebGLRenderingContextBase::getExtensionForBinding(
++    ScriptState* script_state,
++    const String& name) {
++  ScriptObject result = getExtension(script_state, name);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webglRenderingContext",
++                                "getExtensionOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      static_cast<const ScriptValue&>(result).V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptObject(isolate, override_result);
++  }
++  return result;
++}
++
+ ScriptValue WebGLRenderingContextBase::getFramebufferAttachmentParameter(
+     ScriptState* script_state,
+     GLenum target,
+@@ -4108,6 +4141,36 @@ ScriptValue WebGLRenderingContextBase::getParameter(ScriptState* script_state,
+   }
+ }
+ 
++ScriptValue WebGLRenderingContextBase::getParameterForBinding(
++    ScriptState* script_state,
++    GLenum pname) {
++  ScriptValue result = getParameter(script_state, pname);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webglRenderingContext",
++                                "getParameterOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {result.V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptValue(isolate, override_result);
++  }
++  return result;
++}
++
+ ScriptValue WebGLRenderingContextBase::getProgramParameter(
+     ScriptState* script_state,
+     WebGLProgram* program,
+@@ -4293,6 +4356,37 @@ WebGLShaderPrecisionFormat* WebGLRenderingContextBase::getShaderPrecisionFormat(
+                                                           precision);
+ }
+ 
++WebGLShaderPrecisionFormat*
++WebGLRenderingContextBase::getShaderPrecisionFormatForBinding(
++    ScriptState* script_state,
++    GLenum shader_type,
++    GLenum precision_type) {
++  WebGLShaderPrecisionFormat* result =
++      getShaderPrecisionFormat(shader_type, precision_type);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webglRenderingContext",
++                                "getShaderPrecisionFormatOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<WebGLShaderPrecisionFormat>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ String WebGLRenderingContextBase::getShaderSource(WebGLShader* shader) {
+   if (!ValidateWebGLProgramOrShader("getShaderSource", shader))
+     return String();
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+index 060563a9955a8564d176177fc389c4f98aa64e9f..2d4dd0ac92702af4364a087ba20d8889eb1d613a 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -300,11 +300,13 @@ class MODULES_EXPORT WebGLRenderingContextBase
+   WebGLContextAttributes* getContextAttributes() const;
+   GLenum getError();
+   ScriptObject getExtension(ScriptState*, const String& name);
++  ScriptObject getExtensionForBinding(ScriptState*, const String& name);
+   virtual ScriptValue getFramebufferAttachmentParameter(ScriptState*,
+                                                         GLenum target,
+                                                         GLenum attachment,
+                                                         GLenum pname);
+   virtual ScriptValue getParameter(ScriptState*, GLenum pname);
++  ScriptValue getParameterForBinding(ScriptState*, GLenum pname);
+   ScriptValue getProgramParameter(ScriptState*, WebGLProgram*, GLenum pname);
+   String getProgramInfoLog(WebGLProgram*);
+   ScriptValue getRenderbufferParameter(ScriptState*,
+@@ -314,6 +316,10 @@ class MODULES_EXPORT WebGLRenderingContextBase
+   String getShaderInfoLog(WebGLShader*);
+   WebGLShaderPrecisionFormat* getShaderPrecisionFormat(GLenum shader_type,
+                                                        GLenum precision_type);
++  WebGLShaderPrecisionFormat* getShaderPrecisionFormatForBinding(
++      ScriptState*,
++      GLenum shader_type,
++      GLenum precision_type);
+   String getShaderSource(WebGLShader*);
+   std::optional<Vector<String>> getSupportedExtensions();
+   virtual ScriptValue getTexParameter(ScriptState*,
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
+index 9635e2c8ace14a091a7d97a699383af836c153e7..6d9e83ff63ac02dead29a5fe32cad215598b2f95 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
+@@ -556,10 +556,10 @@ interface mixin WebGLRenderingContextBase {
+ 
+     GLenum getError();
+ 
+-    [CallWith=ScriptState, Measure] object? getExtension(DOMString name);
++    [CallWith=ScriptState, Measure, ImplementedAs=getExtensionForBinding] object? getExtension(DOMString name);
+ 
+     [CallWith=ScriptState] any getFramebufferAttachmentParameter(GLenum target, GLenum attachment, GLenum pname);
+-    [MeasureAs=WebGLRenderingContextGetParameter, CallWith=ScriptState] any getParameter(GLenum pname);
++    [MeasureAs=WebGLRenderingContextGetParameter, CallWith=ScriptState, ImplementedAs=getParameterForBinding] any getParameter(GLenum pname);
+     [CallWith=ScriptState] any getProgramParameter(WebGLProgram program, GLenum pname);
+     DOMString? getProgramInfoLog(WebGLProgram program);
+     [MeasureAs=WebGLRenderingContextGetRenderbufferParameter, CallWith=ScriptState] any getRenderbufferParameter(GLenum target, GLenum pname);
+@@ -567,7 +567,7 @@ interface mixin WebGLRenderingContextBase {
+ 
+     DOMString?   getShaderInfoLog(WebGLShader shader);
+ 
+-    [MeasureAs=WebGLRenderingContextGetShaderPrecisionFormat] WebGLShaderPrecisionFormat getShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype);
++    [MeasureAs=WebGLRenderingContextGetShaderPrecisionFormat, CallWith=ScriptState, ImplementedAs=getShaderPrecisionFormatForBinding] WebGLShaderPrecisionFormat getShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype);
+ 
+     DOMString?   getShaderSource(WebGLShader shader);
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+index cf2b3ae1c325a7b89c9701d75f4eeca4e8ea2f38..1ca365a727e584b73f028fa5970d782a1f13cfb9 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+@@ -25,6 +25,10 @@
+ #include "third_party/blink/renderer/modules/webgl/webgl_shader.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_texture.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_uniform_location.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/modules/webgl/webgl_shader_precision_format.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/graphics/gpu/dawn_control_client_holder.h"
+ #include "third_party/blink/renderer/platform/graphics/gpu/webgpu_callback.h"
+ #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
+@@ -4189,4 +4193,190 @@ WebGLRenderingContextWebGPUBase::GLenumToTextureTarget(GLenum target) {
+       return TextureTarget::kUnkown;
+   }
+ }
++ScriptObject WebGLRenderingContextWebGPUBase::getExtensionForBinding(
++    ScriptState* script_state,
++    const String& name) {
++  ScriptObject result = getExtension(script_state, name);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webglRenderingContext",
++                                "getExtensionOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      static_cast<const ScriptValue&>(result).V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptObject(isolate, override_result);
++  }
++  return result;
++}
++
++ScriptValue WebGLRenderingContextWebGPUBase::getParameterForBinding(
++    ScriptState* script_state,
++    GLenum pname) {
++  ScriptValue result = getParameter(script_state, pname);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webglRenderingContext",
++                                "getParameterOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {result.V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptValue(isolate, override_result);
++  }
++  return result;
++}
++
++WebGLShaderPrecisionFormat*
++WebGLRenderingContextWebGPUBase::getShaderPrecisionFormatForBinding(
++    ScriptState* script_state,
++    GLenum shader_type,
++    GLenum precision_type) {
++  WebGLShaderPrecisionFormat* result =
++      getShaderPrecisionFormat(shader_type, precision_type);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webglRenderingContext",
++                                "getShaderPrecisionFormatOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<WebGLShaderPrecisionFormat>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
++ScriptValue WebGLRenderingContextWebGPUBase::getInternalformatParameterForBinding(
++    ScriptState* script_state,
++    GLenum target,
++    GLenum internalformat,
++    GLenum pname) {
++  ScriptValue result =
++      getInternalformatParameter(script_state, target, internalformat, pname);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webgl2RenderingContext",
++                                "getInternalformatParameterOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {result.V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptValue(isolate, override_result);
++  }
++  return result;
++}
++
++WebGLActiveInfo*
++WebGLRenderingContextWebGPUBase::getTransformFeedbackVaryingForBinding(
++    ScriptState* script_state,
++    WebGLProgram* program,
++    GLuint index) {
++  WebGLActiveInfo* result = getTransformFeedbackVarying(program, index);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webgl2RenderingContext",
++                                "getTransformFeedbackVaryingOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<WebGLActiveInfo>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
++ScriptValue WebGLRenderingContextWebGPUBase::getIndexedParameterForBinding(
++    ScriptState* script_state,
++    GLenum target,
++    GLuint index) {
++  ScriptValue result = getIndexedParameter(script_state, target, index);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "webgl2RenderingContext",
++                                "getIndexedParameterOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {result.V8Value()};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (V8ScriptRunner::CallFunction(
++          override_fn, ExecutionContext::From(script_state),
++          context->Global(), 1, argv, isolate)
++          .ToLocal(&override_result)) {
++    return ScriptValue(isolate, override_result);
++  }
++  return result;
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
+index f048f2bd79b66f8f80d6c0e4345ce653e42eb7d7..3139b7aa41ee240e4153748037cae51abdd04ec0 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
+@@ -231,6 +231,12 @@ class MODULES_EXPORT WebGLRenderingContextWebGPUBase
+   ScriptValue getVertexAttrib(ScriptState*, GLuint index, GLenum pname);
+   int64_t getVertexAttribOffset(GLuint index, GLenum pname);
+ 
++  // ForBinding wrappers for override hooks
++  ScriptObject getExtensionForBinding(ScriptState*, const String& name);
++  ScriptValue getParameterForBinding(ScriptState*, GLenum pname);
++  WebGLShaderPrecisionFormat* getShaderPrecisionFormatForBinding(
++      ScriptState*, GLenum shader_type, GLenum precision_type);
++
+   void hint(GLenum target, GLenum mode);
+   bool isBuffer(WebGLBuffer*);
+   bool isEnabled(GLenum cap);
+@@ -1286,6 +1292,14 @@ class MODULES_EXPORT WebGLRenderingContextWebGPUBase
+                   MaybeShared<DOMArrayBufferView> pixels,
+                   int64_t offset);
+ 
++  // ForBinding wrappers for override hooks (WebGL2)
++  ScriptValue getInternalformatParameterForBinding(
++      ScriptState*, GLenum target, GLenum internalformat, GLenum pname);
++  WebGLActiveInfo* getTransformFeedbackVaryingForBinding(
++      ScriptState*, WebGLProgram* program, GLuint index);
++  ScriptValue getIndexedParameterForBinding(
++      ScriptState*, GLenum target, GLuint index);
++
+   // **************************************************************************
+   // End of WebGL2RenderingContextBase's IDL methods
+   // **************************************************************************

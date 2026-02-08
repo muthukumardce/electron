@@ -1,0 +1,748 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 09:13:02 +0530
+Subject: feat: add override hooks for 13 APIs (Batch 8)
+
+SVGTextContentElement.getSubStringLength, SVGGeometryElement.getPointAtLength,
+SVGGraphicsElement.getBBox/getCTM/getScreenCTM,
+IntersectionObserverEntry.intersectionRatio/boundingClientRect,
+NetworkInformation.rtt/downlink/saveData,
+ScreenOrientation.angle, NavigatorPlugins.plugins/mimeTypes
+
+diff --git a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc
+index a197d845006b0a27d9a821bdfe7875cbf64c2294..f724b32ba1db7b33d16819c78934905283bcdc5a 100644
+--- a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc
++++ b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc
+@@ -6,6 +6,10 @@
+ 
+ #include "third_party/blink/renderer/core/dom/element.h"
+ #include "third_party/blink/renderer/core/geometry/dom_rect_read_only.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -15,6 +19,73 @@ IntersectionObserverEntry::IntersectionObserverEntry(
+     Element* target)
+     : geometry_(geometry), time_(time), target_(target) {}
+ 
++namespace {
++double MaybeDoubleOverride(ScriptState* script_state,
++                           double value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Number::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return override_result.As<v8::Number>()->Value();
++  return value;
++}
++}  // namespace
++
++double IntersectionObserverEntry::intersectionRatioForBinding(
++    ScriptState* script_state) const {
++  return MaybeDoubleOverride(script_state, intersectionRatio(),
++                             "intersectionObserverEntry",
++                             "intersectionRatioOverride");
++}
++
++DOMRectReadOnly* IntersectionObserverEntry::boundingClientRectForBinding(
++    ScriptState* script_state) const {
++  DOMRectReadOnly* result = boundingClientRect();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "intersectionObserverEntry",
++                                "boundingClientRectOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<DOMRectReadOnly>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ DOMRectReadOnly* IntersectionObserverEntry::boundingClientRect() const {
+   return DOMRectReadOnly::FromRectF(gfx::RectF(geometry_.TargetRect()));
+ }
+diff --git a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h
+index d2b557433b0a03abe348bb8227a34d1daeab0230..2db1eee5448928f0645547a5846a0d800ba47726 100644
+--- a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h
++++ b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h
+@@ -16,6 +16,7 @@ namespace blink {
+ 
+ class DOMRectReadOnly;
+ class Element;
++class ScriptState;
+ 
+ class CORE_EXPORT IntersectionObserverEntry final : public ScriptWrappable {
+   DEFINE_WRAPPERTYPEINFO();
+@@ -28,7 +29,9 @@ class CORE_EXPORT IntersectionObserverEntry final : public ScriptWrappable {
+   // IDL interface
+   double time() const { return time_; }
+   double intersectionRatio() const { return geometry_.IntersectionRatio(); }
++  double intersectionRatioForBinding(ScriptState*) const;
+   DOMRectReadOnly* boundingClientRect() const;
++  DOMRectReadOnly* boundingClientRectForBinding(ScriptState*) const;
+   DOMRectReadOnly* rootBounds() const;
+   DOMRectReadOnly* intersectionRect() const;
+   bool isIntersecting() const { return geometry_.IsIntersecting(); }
+diff --git a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl
+index 598079abcc82d03736e9d33a91ffdbd88398aba2..25da5e4139296e03c083862743474c0229d759e7 100644
+--- a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl
++++ b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl
+@@ -10,10 +10,10 @@
+     readonly attribute DOMHighResTimeStamp time;
+     // TODO(szager): |rootBounds| should not be nullable.
+     readonly attribute DOMRectReadOnly? rootBounds;
+-    readonly attribute DOMRectReadOnly boundingClientRect;
++    [CallWith=ScriptState, ImplementedAs=boundingClientRectForBinding] readonly attribute DOMRectReadOnly boundingClientRect;
+     readonly attribute DOMRectReadOnly intersectionRect;
+     readonly attribute boolean isIntersecting;
+     readonly attribute boolean isVisible;
+-    readonly attribute double intersectionRatio;
++    [CallWith=ScriptState, ImplementedAs=intersectionRatioForBinding] readonly attribute double intersectionRatio;
+     readonly attribute Element target;
+ };
+diff --git a/third_party/blink/renderer/core/svg/svg_geometry_element.cc b/third_party/blink/renderer/core/svg/svg_geometry_element.cc
+index d6e1a61d855bf2d2a37ff4cc76a200548bfb4a6e..27e9d237e7829b8ecf7566dfa3c5a320cf9afa8d 100644
+--- a/third_party/blink/renderer/core/svg/svg_geometry_element.cc
++++ b/third_party/blink/renderer/core/svg/svg_geometry_element.cc
+@@ -37,6 +37,7 @@
+ #include "third_party/blink/renderer/core/layout/svg/svg_layout_support.h"
+ #include "third_party/blink/renderer/core/svg/svg_animated_number.h"
+ #include "third_party/blink/renderer/core/svg/svg_point_tear_off.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/core/svg_names.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+@@ -229,6 +230,35 @@ float SVGGeometryElement::getTotalLengthForBinding(
+                             "svgGeometryElement", "getTotalLengthOverride");
+ }
+ 
++SVGPointTearOff* SVGGeometryElement::getPointAtLengthForBinding(
++    ScriptState* script_state,
++    float distance,
++    ExceptionState& exception_state) {
++  SVGPointTearOff* result = getPointAtLength(distance, exception_state);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "svgGeometryElement",
++                                "getPointAtLengthOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<SVGPointTearOff>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ SVGPointTearOff* SVGGeometryElement::getPointAtLength(
+     float length,
+     ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/core/svg/svg_geometry_element.h b/third_party/blink/renderer/core/svg/svg_geometry_element.h
+index ae3f727a38e3dd35a69493644444a5dcbf0db414..1ad88ad8220c22e0f8ece1190aa68b55ec5d281d 100644
+--- a/third_party/blink/renderer/core/svg/svg_geometry_element.h
++++ b/third_party/blink/renderer/core/svg/svg_geometry_element.h
+@@ -60,6 +60,9 @@ class SVGGeometryElement : public SVGGraphicsElement {
+   virtual float getTotalLength(ExceptionState&);
+   float getTotalLengthForBinding(ScriptState*, ExceptionState&);
+   virtual SVGPointTearOff* getPointAtLength(float distance, ExceptionState&);
++  SVGPointTearOff* getPointAtLengthForBinding(ScriptState*,
++                                              float distance,
++                                              ExceptionState&);
+ 
+   float AuthorPathLength() const;
+   float PathLengthScaleFactor() const;
+diff --git a/third_party/blink/renderer/core/svg/svg_geometry_element.idl b/third_party/blink/renderer/core/svg/svg_geometry_element.idl
+index 82b6d6928e60b4ea77da53035ca292b2fe9ed64f..9525897431eabec694913e3b54c6917e5e2002d2 100644
+--- a/third_party/blink/renderer/core/svg/svg_geometry_element.idl
++++ b/third_party/blink/renderer/core/svg/svg_geometry_element.idl
+@@ -37,5 +37,5 @@ interface SVGGeometryElement : SVGGraphicsElement {
+     [Measure] boolean isPointInFill(optional DOMPointInit point = {});
+     [Measure] boolean isPointInStroke(optional DOMPointInit point = {});
+     [Measure, RaisesException, CallWith=ScriptState, ImplementedAs=getTotalLengthForBinding] float getTotalLength();
+-    [Measure, RaisesException] SVGPoint getPointAtLength(float distance);
++    [Measure, RaisesException, CallWith=ScriptState, ImplementedAs=getPointAtLengthForBinding] SVGPoint getPointAtLength(float distance);
+ };
+diff --git a/third_party/blink/renderer/core/svg/svg_graphics_element.cc b/third_party/blink/renderer/core/svg/svg_graphics_element.cc
+index bf35ac382aafe7c2bb3249d9c4ceb57192460ee8..f4ca05481d4f53914bfb0656997c06da6693d3dd 100644
+--- a/third_party/blink/renderer/core/svg/svg_graphics_element.cc
++++ b/third_party/blink/renderer/core/svg/svg_graphics_element.cc
+@@ -34,6 +34,10 @@
+ #include "third_party/blink/renderer/core/svg/svg_image_element.h"
+ #include "third_party/blink/renderer/core/svg/svg_matrix_tear_off.h"
+ #include "third_party/blink/renderer/core/svg/svg_rect_tear_off.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/core/svg/svg_svg_element.h"
+ #include "third_party/blink/renderer/core/svg/svg_symbol_element.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -137,6 +141,87 @@ AffineTransform SVGGraphicsElement::ComputeCTM(
+   return ctm;
+ }
+ 
++SVGRectTearOff* SVGGraphicsElement::getBBoxForBinding(
++    ScriptState* script_state) {
++  SVGRectTearOff* result = getBBoxFromJavascript();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "svgGraphicsElement",
++                                "getBBoxOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<SVGRectTearOff>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
++SVGMatrixTearOff* SVGGraphicsElement::getCTMForBinding(
++    ScriptState* script_state) {
++  SVGMatrixTearOff* result = getCTM();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "svgGraphicsElement",
++                                "getCTMOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<SVGMatrixTearOff>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
++SVGMatrixTearOff* SVGGraphicsElement::getScreenCTMForBinding(
++    ScriptState* script_state) {
++  SVGMatrixTearOff* result = getScreenCTM();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "svgGraphicsElement",
++                                "getScreenCTMOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<SVGMatrixTearOff>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ SVGMatrixTearOff* SVGGraphicsElement::getCTM() {
+   GetDocument().UpdateStyleAndLayoutForNode(this,
+                                             DocumentUpdateReason::kJavaScript);
+diff --git a/third_party/blink/renderer/core/svg/svg_graphics_element.h b/third_party/blink/renderer/core/svg/svg_graphics_element.h
+index 792d0ca45191f487275347388e207bbc9a8c4c5c..77a1dd0a314c995d5393129a7b72f726de88880e 100644
+--- a/third_party/blink/renderer/core/svg/svg_graphics_element.h
++++ b/third_party/blink/renderer/core/svg/svg_graphics_element.h
+@@ -28,6 +28,7 @@
+ 
+ namespace blink {
+ 
++class ScriptState;
+ class SVGMatrixTearOff;
+ class SVGRectTearOff;
+ 
+@@ -39,7 +40,10 @@ class CORE_EXPORT SVGGraphicsElement : public SVGTransformableElement,
+   ~SVGGraphicsElement() override;
+ 
+   SVGMatrixTearOff* getCTM();
++  SVGMatrixTearOff* getCTMForBinding(ScriptState*);
+   SVGMatrixTearOff* getScreenCTM();
++  SVGMatrixTearOff* getScreenCTMForBinding(ScriptState*);
++  SVGRectTearOff* getBBoxForBinding(ScriptState*);
+ 
+   SVGElement* nearestViewportElement() const;
+   SVGElement* farthestViewportElement() const;
+diff --git a/third_party/blink/renderer/core/svg/svg_graphics_element.idl b/third_party/blink/renderer/core/svg/svg_graphics_element.idl
+index da35d78a36de3b715d48110adaf17af28e779bcb..ce3c3fe156f36c6870e32a0e4681f9971ba9a2d3 100644
+--- a/third_party/blink/renderer/core/svg/svg_graphics_element.idl
++++ b/third_party/blink/renderer/core/svg/svg_graphics_element.idl
+@@ -34,9 +34,9 @@
+ interface SVGGraphicsElement : SVGElement {
+     [Measure] readonly attribute SVGAnimatedTransformList transform;
+ 
+-    [ImplementedAs=getBBoxFromJavascript] SVGRect getBBox();
+-    SVGMatrix getCTM();
+-    SVGMatrix getScreenCTM();
++    [CallWith=ScriptState, ImplementedAs=getBBoxForBinding] SVGRect getBBox();
++    [CallWith=ScriptState, ImplementedAs=getCTMForBinding] SVGMatrix getCTM();
++    [CallWith=ScriptState, ImplementedAs=getScreenCTMForBinding] SVGMatrix getScreenCTM();
+ 
+     // TODO(foolip): The following two properties existed on SVGLocatable in SVG
+     // 1.1, but were removed in SVG2. https://crbug.com/695981
+diff --git a/third_party/blink/renderer/core/svg/svg_text_content_element.cc b/third_party/blink/renderer/core/svg/svg_text_content_element.cc
+index 53cbc1bf9c7c22a1767ed331d0db7044ad99bab9..2d1554dba213cd89f9093ea38f13dfcbd6f690db 100644
+--- a/third_party/blink/renderer/core/svg/svg_text_content_element.cc
++++ b/third_party/blink/renderer/core/svg/svg_text_content_element.cc
+@@ -163,6 +163,16 @@ float SVGTextContentElement::getComputedTextLengthForBinding(
+                             "getComputedTextLengthOverride");
+ }
+ 
++float SVGTextContentElement::getSubStringLengthForBinding(
++    ScriptState* script_state,
++    unsigned charnum,
++    unsigned nchars,
++    ExceptionState& exception_state) {
++  return MaybeFloatOverride(
++      script_state, getSubStringLength(charnum, nchars, exception_state),
++      "svgTextContentElement", "getSubStringLengthOverride");
++}
++
+ float SVGTextContentElement::getSubStringLength(
+     unsigned charnum,
+     unsigned nchars,
+diff --git a/third_party/blink/renderer/core/svg/svg_text_content_element.h b/third_party/blink/renderer/core/svg/svg_text_content_element.h
+index 18e612f2e8226c631da77c362b60e7b3423d335c..ec3432d0907e96e094e675da12fda41b67c8ce87 100644
+--- a/third_party/blink/renderer/core/svg/svg_text_content_element.h
++++ b/third_party/blink/renderer/core/svg/svg_text_content_element.h
+@@ -57,6 +57,10 @@ class CORE_EXPORT SVGTextContentElement : public SVGGraphicsElement {
+   float getComputedTextLength();
+   float getComputedTextLengthForBinding(ScriptState*);
+   float getSubStringLength(unsigned charnum, unsigned nchars, ExceptionState&);
++  float getSubStringLengthForBinding(ScriptState*,
++                                     unsigned charnum,
++                                     unsigned nchars,
++                                     ExceptionState&);
+   SVGPointTearOff* getStartPositionOfChar(unsigned charnum, ExceptionState&);
+   SVGPointTearOff* getEndPositionOfChar(unsigned charnum, ExceptionState&);
+   SVGRectTearOff* getExtentOfChar(unsigned charnum, ExceptionState&);
+diff --git a/third_party/blink/renderer/core/svg/svg_text_content_element.idl b/third_party/blink/renderer/core/svg/svg_text_content_element.idl
+index c9a201f3868dd6c4ecb2a675ca3b98074439feee..4f732ea7474f3c633cc6ebbddaa353878d7b903e 100644
+--- a/third_party/blink/renderer/core/svg/svg_text_content_element.idl
++++ b/third_party/blink/renderer/core/svg/svg_text_content_element.idl
+@@ -37,7 +37,7 @@ interface SVGTextContentElement : SVGGraphicsElement {
+ 
+     long getNumberOfChars();
+     [Measure, CallWith=ScriptState, ImplementedAs=getComputedTextLengthForBinding] float getComputedTextLength();
+-    [Measure, RaisesException] float getSubStringLength(unsigned long charnum, unsigned long nchars);
++    [Measure, RaisesException, CallWith=ScriptState, ImplementedAs=getSubStringLengthForBinding] float getSubStringLength(unsigned long charnum, unsigned long nchars);
+     [Measure, RaisesException] SVGPoint getStartPositionOfChar(unsigned long charnum);
+     [Measure, RaisesException] SVGPoint getEndPositionOfChar(unsigned long charnum);
+     [Measure, RaisesException] SVGRect getExtentOfChar(unsigned long charnum);
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 6e5958aa3a417451b1b11817f9f78381b2ec0d81..1356ea4d78a68062acbbc40e07211f54fae29d55 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -21,6 +21,8 @@
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -130,6 +132,86 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+       EffectiveConnectionTypeToEnum(effective_type_));
+ }
+ 
++namespace {
++double MaybeDoubleOverride(ScriptState* script_state,
++                           double value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Number::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return override_result.As<v8::Number>()->Value();
++  return value;
++}
++
++bool MaybeBoolOverride(ScriptState* script_state,
++                       bool value,
++                       const char* interface_key,
++                       const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Boolean::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsBoolean())
++    return override_result.As<v8::Boolean>()->Value();
++  return value;
++}
++}  // namespace
++
++uint32_t NetworkInformation::rttForBinding(ScriptState* script_state) {
++  return static_cast<uint32_t>(MaybeDoubleOverride(
++      script_state, static_cast<double>(rtt()), "networkInformation",
++      "rttOverride"));
++}
++
++double NetworkInformation::downlinkForBinding(ScriptState* script_state) {
++  return MaybeDoubleOverride(script_state, downlink(), "networkInformation",
++                             "downlinkOverride");
++}
++
++bool NetworkInformation::saveDataForBinding(ScriptState* script_state) const {
++  return MaybeBoolOverride(script_state, saveData(), "networkInformation",
++                           "saveDataOverride");
++}
++
+ uint32_t NetworkInformation::rtt() {
+   MaybeShowWebHoldbackConsoleMsg();
+   std::optional<base::TimeDelta> override_rtt =
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.h b/third_party/blink/renderer/modules/netinfo/network_information.h
+index ac6a9b30196ffcb9612725b251a84098447c5738..a6570260f458d36bb3ece36cc7ffa06d9bd3e0b5 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.h
++++ b/third_party/blink/renderer/modules/netinfo/network_information.h
+@@ -17,6 +17,7 @@
+ namespace blink {
+ 
+ class NavigatorBase;
++class ScriptState;
+ class V8ConnectionType;
+ class V8EffectiveConnectionType;
+ 
+@@ -38,8 +39,11 @@ class NetworkInformation final
+   double downlinkMax() const;
+   V8EffectiveConnectionType effectiveType();
+   uint32_t rtt();
++  uint32_t rttForBinding(ScriptState*);
+   double downlink();
++  double downlinkForBinding(ScriptState*);
+   bool saveData() const;
++  bool saveDataForBinding(ScriptState*) const;
+ 
+   // NetworkStateObserver overrides.
+   void ConnectionChange(WebConnectionType,
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.idl b/third_party/blink/renderer/modules/netinfo/network_information.idl
+index 0fdaa508991ba8ad8473bcf5adfcdf4c63a5feec..d6a7f75bac8a2623f5f9d9085e06a9b1a5d35388 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.idl
++++ b/third_party/blink/renderer/modules/netinfo/network_information.idl
+@@ -34,7 +34,7 @@ typedef unsigned long long Milliseconds;
+     [MeasureAs=NetInfoOnChange] attribute EventHandler onchange;
+     [RuntimeEnabled=NetInfoDownlinkMax, MeasureAs=NetInfoOnTypeChange] attribute EventHandler ontypechange;
+     [MeasureAs=NetInfoEffectiveType] readonly attribute EffectiveConnectionType effectiveType;
+-    [MeasureAs=NetInfoRtt] readonly attribute Milliseconds rtt;
+-    [MeasureAs=NetInfoDownlink] readonly attribute Megabit downlink;
+-    [MeasureAs=NetInfoSaveData] readonly attribute boolean saveData;
++    [MeasureAs=NetInfoRtt, CallWith=ScriptState, ImplementedAs=rttForBinding] readonly attribute Milliseconds rtt;
++    [MeasureAs=NetInfoDownlink, CallWith=ScriptState, ImplementedAs=downlinkForBinding] readonly attribute Megabit downlink;
++    [MeasureAs=NetInfoSaveData, CallWith=ScriptState, ImplementedAs=saveDataForBinding] readonly attribute boolean saveData;
+ };
+diff --git a/third_party/blink/renderer/modules/plugins/navigator_plugins.cc b/third_party/blink/renderer/modules/plugins/navigator_plugins.cc
+index c5df968fa0432df98531cef4af9973ccc1fbaec2..b1095c3fa1c53e965f24af874b5e8be2022ea1a6 100644
+--- a/third_party/blink/renderer/modules/plugins/navigator_plugins.cc
++++ b/third_party/blink/renderer/modules/plugins/navigator_plugins.cc
+@@ -11,6 +11,10 @@
+ #include "third_party/blink/renderer/modules/plugins/dom_mime_type.h"
+ #include "third_party/blink/renderer/modules/plugins/dom_mime_type_array.h"
+ #include "third_party/blink/renderer/modules/plugins/dom_plugin_array.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -34,11 +38,68 @@ DOMPluginArray* NavigatorPlugins::plugins(Navigator& navigator) {
+   return NavigatorPlugins::From(navigator).plugins(navigator.DomWindow());
+ }
+ 
++// static
++DOMPluginArray* NavigatorPlugins::pluginsForBinding(ScriptState* script_state,
++                                                    Navigator& navigator) {
++  DOMPluginArray* result = plugins(navigator);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "navigator",
++                                "pluginsOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<DOMPluginArray>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ // static
+ DOMMimeTypeArray* NavigatorPlugins::mimeTypes(Navigator& navigator) {
+   return NavigatorPlugins::From(navigator).mimeTypes(navigator.DomWindow());
+ }
+ 
++// static
++DOMMimeTypeArray* NavigatorPlugins::mimeTypesForBinding(
++    ScriptState* script_state,
++    Navigator& navigator) {
++  DOMMimeTypeArray* result = mimeTypes(navigator);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "navigator",
++                                "mimeTypesOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<DOMMimeTypeArray>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ // static
+ bool NavigatorPlugins::pdfViewerEnabled(Navigator& navigator) {
+   return NavigatorPlugins::From(navigator).pdfViewerEnabled(
+diff --git a/third_party/blink/renderer/modules/plugins/navigator_plugins.h b/third_party/blink/renderer/modules/plugins/navigator_plugins.h
+index 60b2c29abd387999d1bcc65bbbfb71e69ee66009..5d552e950d58fdb39736a2c82e62777968605128 100644
+--- a/third_party/blink/renderer/modules/plugins/navigator_plugins.h
++++ b/third_party/blink/renderer/modules/plugins/navigator_plugins.h
+@@ -13,6 +13,7 @@ class DOMMimeTypeArray;
+ class DOMPluginArray;
+ class LocalDOMWindow;
+ class Navigator;
++class ScriptState;
+ 
+ class NavigatorPlugins final : public GarbageCollected<NavigatorPlugins>,
+                                public GarbageCollectedMixin {
+@@ -21,7 +22,9 @@ class NavigatorPlugins final : public GarbageCollected<NavigatorPlugins>,
+   static NavigatorPlugins* ToNavigatorPlugins(Navigator&);
+ 
+   static DOMPluginArray* plugins(Navigator&);
++  static DOMPluginArray* pluginsForBinding(ScriptState*, Navigator&);
+   static DOMMimeTypeArray* mimeTypes(Navigator&);
++  static DOMMimeTypeArray* mimeTypesForBinding(ScriptState*, Navigator&);
+   static bool pdfViewerEnabled(Navigator&);
+ 
+   static bool javaEnabled(Navigator&);
+diff --git a/third_party/blink/renderer/modules/plugins/navigator_plugins.idl b/third_party/blink/renderer/modules/plugins/navigator_plugins.idl
+index 404b338fd595ec22e99b254eb6a933710614e2cd..4cb676f1ed8686f0fb66356903c29b5548f84ec5 100644
+--- a/third_party/blink/renderer/modules/plugins/navigator_plugins.idl
++++ b/third_party/blink/renderer/modules/plugins/navigator_plugins.idl
+@@ -6,8 +6,8 @@
+ [
+     ImplementedAs=NavigatorPlugins
+ ] interface mixin NavigatorPlugins {
+-    [MeasureAs=NavigatorPlugins, SameObject] readonly attribute PluginArray plugins;
+-    [MeasureAs=NavigatorMimeTypes, SameObject] readonly attribute MimeTypeArray mimeTypes;
++    [MeasureAs=NavigatorPlugins, SameObject, CallWith=ScriptState, ImplementedAs=pluginsForBinding] readonly attribute PluginArray plugins;
++    [MeasureAs=NavigatorMimeTypes, SameObject, CallWith=ScriptState, ImplementedAs=mimeTypesForBinding] readonly attribute MimeTypeArray mimeTypes;
+     [Measure] boolean javaEnabled();
+     [MeasureAs=NavigatorPdfViewerEnabled] readonly attribute boolean pdfViewerEnabled;
+ };
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+index fce1a975e3a2e982d0e5c09d8219363c5187ae79..c0d11111c0a5f0ebe1792efb22686d2392543ec0 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+@@ -18,6 +18,8 @@
+ #include "third_party/blink/renderer/modules/screen_orientation/screen_orientation_controller.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/wtf/assertions.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -95,6 +97,45 @@ uint16_t ScreenOrientation::angle() const {
+   return angle_;
+ }
+ 
++namespace {
++uint16_t MaybeUint16Override(ScriptState* script_state,
++                             uint16_t value,
++                             const char* interface_key,
++                             const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<uint16_t>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++}  // namespace
++
++uint16_t ScreenOrientation::angleForBinding(ScriptState* script_state) const {
++  return MaybeUint16Override(script_state, angle(), "screenOrientation",
++                             "angleOverride");
++}
++
+ void ScreenOrientation::SetType(display::mojom::blink::ScreenOrientation type) {
+   type_ = type;
+ }
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
+index 7f78348131c04550947dc9e6af84e3143edafc5c..092bb2bbb76dc6520bf741f1b4f8cd3d6ba80f85 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
+@@ -41,6 +41,7 @@ class MODULES_EXPORT ScreenOrientation final : public EventTarget,
+ 
+   V8OrientationType type() const;
+   uint16_t angle() const;
++  uint16_t angleForBinding(ScriptState*) const;
+ 
+   void SetType(display::mojom::blink::ScreenOrientation);
+   void SetAngle(uint16_t);
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
+index 88e4c2b6e79c93c449a5e9c8f7653596f7e9d20c..97daafeb764cefdac2f6074e913f91db833891e4 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
+@@ -24,7 +24,7 @@ enum OrientationType {
+ 
+ [Exposed=Window]
+ interface ScreenOrientation : EventTarget {
+-    [MeasureAs=ScreenOrientationAngle] readonly attribute unsigned short angle;
++    [MeasureAs=ScreenOrientationAngle, CallWith=ScriptState, ImplementedAs=angleForBinding] readonly attribute unsigned short angle;
+     [MeasureAs=ScreenOrientationType] readonly attribute OrientationType type;
+ 
+     [CallWith=ScriptState, MeasureAs=ScreenOrientationLock, RaisesException] Promise<undefined> lock(OrientationLockType orientation);

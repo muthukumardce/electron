@@ -1,0 +1,507 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 10:33:48 +0530
+Subject: feat: add override hooks for 10 APIs (Batch 10)
+
+SpeechSynthesis: pending, speaking, paused
+NavigatorOnLine: onLine
+FontFaceSet: check
+Performance: timing, memory
+RTCPeerConnection: localDescription, remoteDescription, createDataChannel
+
+Also adds MaybeBoolOverride helper to custom_override_helpers.h.
+
+diff --git a/third_party/blink/renderer/core/css/font_face_set.cc b/third_party/blink/renderer/core/css/font_face_set.cc
+index 5c0e930ae829f986062c986823fc9f9d5d384f26..a48ed608fcdad57fc4e605a2c87c19a5abe25cef 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.cc
++++ b/third_party/blink/renderer/core/css/font_face_set.cc
+@@ -10,6 +10,8 @@
+ #include "third_party/blink/renderer/core/css/font_face_set_load_event.h"
+ #include "third_party/blink/renderer/platform/font_family_names.h"
+ #include "third_party/blink/renderer/platform/fonts/font.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/wtf/functional.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+@@ -352,4 +354,15 @@ FontFaceSetIterable::IterationSource* FontFaceSet::CreateIterationSource(
+   return MakeGarbageCollected<IterationSource>(std::move(font_faces));
+ }
+ 
++bool FontFaceSet::checkForBinding(ScriptState* script_state,
++                                   const String& font,
++                                   const String& text,
++                                   ExceptionState& exception_state) {
++  bool result = check(font, text, exception_state);
++  if (exception_state.HadException())
++    return result;
++  return MaybeBoolOverride(script_state, "fontFaceSet",
++                           "checkOverride", result);
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/css/font_face_set.h b/third_party/blink/renderer/core/css/font_face_set.h
+index 01c8be90878e83ae5097e58db63932bf5152b3f4..aae3daf8c6fec56cb3c071d89856a339c70c6455 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.h
++++ b/third_party/blink/renderer/core/css/font_face_set.h
+@@ -48,6 +48,10 @@ class CORE_EXPORT FontFaceSet : public EventTarget,
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(loadingerror, kLoadingerror)
+ 
+   bool check(const String& font, const String& text, ExceptionState&);
++  bool checkForBinding(ScriptState*,
++                       const String& font,
++                       const String& text,
++                       ExceptionState&);
+   ScriptPromise<IDLSequence<FontFace>> load(ScriptState*,
+                                             const String& font,
+                                             const String& text);
+diff --git a/third_party/blink/renderer/core/css/font_face_set.idl b/third_party/blink/renderer/core/css/font_face_set.idl
+index eb006248eac21e8acc048480cee40877c4d78f7f..38e3ec9fad3783056ef04726903ddbe33ff6d0d5 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.idl
++++ b/third_party/blink/renderer/core/css/font_face_set.idl
+@@ -51,7 +51,7 @@ enum FontFaceSetLoadStatus { "loading", "loaded" };
+ 
+     // return whether all fonts in the fontlist are loaded
+     // (does not initiate load if not available)
+-    [RaisesException] boolean check(DOMString font, optional DOMString text = " ");
++    [CallWith=ScriptState, RaisesException, ImplementedAs=checkForBinding] boolean check(DOMString font, optional DOMString text = " ");
+ 
+     // async notification that font loading and layout operations are done
+     [CallWith=ScriptState] readonly attribute Promise<FontFaceSet> ready;
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index e1a0ea8d10b91058d0442569657a567887c0fb8b..08c0f1f73df42d91913fa97aefcb8e5b6610ecb2 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -155,4 +155,10 @@ UserAgentMetadata NavigatorBase::GetUserAgentMetadata() const {
+                            : blink::UserAgentMetadata();
+ }
+ 
++bool NavigatorOnLine::onLineForBinding(ScriptState* script_state) {
++  bool result = onLine();
++  return MaybeBoolOverride(script_state, "navigator",
++                           "onLineOverride", result);
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_on_line.h b/third_party/blink/renderer/core/frame/navigator_on_line.h
+index 8abdab7b05d58d5540942d7949620a8ca5365298..bd3696d9eb98ca2a62dc97e5757c1d81eca96260 100644
+--- a/third_party/blink/renderer/core/frame/navigator_on_line.h
++++ b/third_party/blink/renderer/core/frame/navigator_on_line.h
+@@ -36,9 +36,12 @@
+ 
+ namespace blink {
+ 
++class ScriptState;
++
+ class CORE_EXPORT NavigatorOnLine {
+  public:
+   bool onLine() { return GetNetworkStateNotifier().OnLine(); }
++  bool onLineForBinding(ScriptState*);
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_on_line.idl b/third_party/blink/renderer/core/frame/navigator_on_line.idl
+index 63a987cf5dc60a1b821d05dc9ac1c37f3211d6b2..c074f220628ade3e0c4749aab5f7cd586f81f0dd 100644
+--- a/third_party/blink/renderer/core/frame/navigator_on_line.idl
++++ b/third_party/blink/renderer/core/frame/navigator_on_line.idl
+@@ -31,5 +31,5 @@
+ // https://html.spec.whatwg.org/C/#navigator.online
+ 
+ interface mixin NavigatorOnLine {
+-    readonly attribute boolean onLine;
++    [CallWith=ScriptState, ImplementedAs=onLineForBinding] readonly attribute boolean onLine;
+ };
+diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
+index 709c95849f9c2f948171b451ee828782c7fe9b22..99fe6237de219f3e31f172f31bcac102fd2997c4 100644
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -50,6 +50,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_performance_mark_options.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_performance_measure_options.h"
+@@ -88,6 +89,8 @@
+ #include "third_party/blink/renderer/core/timing/performance_paint_timing.h"
+ #include "third_party/blink/renderer/core/timing/performance_resource_timing.h"
+ #include "third_party/blink/renderer/core/timing/performance_server_timing.h"
++#include "third_party/blink/renderer/core/timing/memory_info.h"
++#include "third_party/blink/renderer/core/timing/performance_timing.h"
+ #include "third_party/blink/renderer/core/timing/performance_user_timing.h"
+ #include "third_party/blink/renderer/core/timing/profiler.h"
+ #include "third_party/blink/renderer/core/timing/profiler_group.h"
+@@ -1478,4 +1481,57 @@ void Performance::ResetTimeOriginForTesting(base::TimeTicks time_origin) {
+   time_origin_ = time_origin;
+ }
+ 
++PerformanceTiming* Performance::timingForBinding(
++    ScriptState* script_state) const {
++  PerformanceTiming* result = timing();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "performance",
++                                "timingOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<PerformanceTiming>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
++MemoryInfo* Performance::memoryForBinding(ScriptState* script_state) const {
++  MemoryInfo* result = memory(script_state);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "performance",
++                                "memoryOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<MemoryInfo>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/timing/performance.h b/third_party/blink/renderer/core/timing/performance.h
+index 6f2128aa22ef5087cdc53c608306b38ae4ca67bd..53c914bae1985a05d106b2f3a22b9cbaf91bb4ad 100644
+--- a/third_party/blink/renderer/core/timing/performance.h
++++ b/third_party/blink/renderer/core/timing/performance.h
+@@ -116,6 +116,8 @@ class CORE_EXPORT Performance : public EventTarget {
+   virtual PerformanceTiming* timing() const;
+   virtual PerformanceNavigation* navigation() const;
+   virtual MemoryInfo* memory(ScriptState*) const;
++  PerformanceTiming* timingForBinding(ScriptState*) const;
++  MemoryInfo* memoryForBinding(ScriptState*) const;
+   virtual ScriptPromise<MemoryMeasurement> measureUserAgentSpecificMemory(
+       ScriptState*,
+       ExceptionState& exception_state) const;
+diff --git a/third_party/blink/renderer/core/timing/performance.idl b/third_party/blink/renderer/core/timing/performance.idl
+index f80549bab7d6b2221fe2d77e801848052660e35e..33e35084f3806f46e276c3cdce18baca4d043b9d 100644
+--- a/third_party/blink/renderer/core/timing/performance.idl
++++ b/third_party/blink/renderer/core/timing/performance.idl
+@@ -52,7 +52,7 @@ interface Performance : EventTarget {
+ 
+     // Navigation Timing
+     // https://w3c.github.io/navigation-timing/#extensions-to-the-performance-interface
+-    [Exposed=Window, SameObject, Measure] readonly attribute PerformanceTiming timing;
++    [Exposed=Window, SameObject, Measure, CallWith=ScriptState, ImplementedAs=timingForBinding] readonly attribute PerformanceTiming timing;
+     [Exposed=Window, SameObject, Measure] readonly attribute PerformanceNavigation navigation;
+ 
+     // User Timing
+@@ -64,7 +64,7 @@ interface Performance : EventTarget {
+ 
+     // TODO(foolip): There is no spec for the Memory Info API, see blink-dev:
+     // https://groups.google.com/a/chromium.org/d/msg/blink-dev/g5YRCGpC9vs/b4OJz71NmPwJ
+-    [Exposed=Window, Measure, CallWith=ScriptState] readonly attribute MemoryInfo memory;
++    [Exposed=Window, Measure, CallWith=ScriptState, ImplementedAs=memoryForBinding] readonly attribute MemoryInfo memory;
+ 
+     // The API is not exposed to DedicatedWorker because the memory usage of
+     // a dedicated worker is included in the result of the API call in Window.
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+index 91b8815f00d9307fd8fba9782c2b92de9287b7fc..461f3c82f0290adccf5229c4f854c7a16b2483fc 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+@@ -58,6 +58,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/dictionary.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_object_string.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_union_string_stringsequence.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_void_function.h"
+@@ -119,6 +120,7 @@
+ #include "third_party/blink/renderer/modules/peerconnection/rtc_void_request_impl.h"
+ #include "third_party/blink/renderer/modules/peerconnection/rtc_void_request_promise_impl.h"
+ #include "third_party/blink/renderer/modules/peerconnection/web_rtc_stats_report_callback_resolver.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_code.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+@@ -1097,6 +1099,28 @@ RTCSessionDescription* RTCPeerConnection::localDescription() const {
+                                     : current_local_description_;
+ }
+ 
++RTCSessionDescription* RTCPeerConnection::localDescriptionForBinding(
++    ScriptState* script_state) const {
++  RTCSessionDescription* result = localDescription();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Value> v8_value =
++      ToV8Traits<RTCSessionDescription>::ToV8(script_state, result);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "rtcPeerConnection", "localDescriptionOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ RTCSessionDescription* RTCPeerConnection::currentLocalDescription() const {
+   return current_local_description_.Get();
+ }
+@@ -1205,6 +1229,28 @@ RTCSessionDescription* RTCPeerConnection::remoteDescription() const {
+                                      : current_remote_description_;
+ }
+ 
++RTCSessionDescription* RTCPeerConnection::remoteDescriptionForBinding(
++    ScriptState* script_state) const {
++  RTCSessionDescription* result = remoteDescription();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Value> v8_value =
++      ToV8Traits<RTCSessionDescription>::ToV8(script_state, result);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "rtcPeerConnection", "remoteDescriptionOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ RTCSessionDescription* RTCPeerConnection::currentRemoteDescription() const {
+   return current_remote_description_.Get();
+ }
+@@ -2073,6 +2119,33 @@ RTCDataChannel* RTCPeerConnection::createDataChannel(
+   return channel;
+ }
+ 
++RTCDataChannel* RTCPeerConnection::createDataChannelForBinding(
++    ScriptState* script_state,
++    String label,
++    const RTCDataChannelInit* data_channel_dict,
++    ExceptionState& exception_state) {
++  RTCDataChannel* result =
++      createDataChannel(script_state, label, data_channel_dict, exception_state);
++  if (!result || exception_state.HadException() || !script_state ||
++      !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Value> v8_value =
++      ToV8Traits<RTCDataChannel>::ToV8(script_state, result);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "rtcPeerConnection", "createDataChannelOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ MediaStreamTrack* RTCPeerConnection::GetTrackForTesting(
+     MediaStreamComponent* component) const {
+   auto it = tracks_.find(component);
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
+index fdaa802ee84a99ebffb9fa059249e7e0266e02e5..a4d75aae20a4c4726a465a48e0eb04a3d7ae34bd 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
+@@ -142,6 +142,7 @@ class MODULES_EXPORT RTCPeerConnection final
+       V8VoidFunction*,
+       V8RTCPeerConnectionErrorCallback* = nullptr);
+   RTCSessionDescription* localDescription() const;
++  RTCSessionDescription* localDescriptionForBinding(ScriptState*) const;
+   RTCSessionDescription* currentLocalDescription() const;
+   RTCSessionDescription* pendingLocalDescription() const;
+ 
+@@ -155,6 +156,7 @@ class MODULES_EXPORT RTCPeerConnection final
+       V8VoidFunction*,
+       V8RTCPeerConnectionErrorCallback* = nullptr);
+   RTCSessionDescription* remoteDescription() const;
++  RTCSessionDescription* remoteDescriptionForBinding(ScriptState*) const;
+   RTCSessionDescription* currentRemoteDescription() const;
+   RTCSessionDescription* pendingRemoteDescription() const;
+ 
+@@ -219,6 +221,10 @@ class MODULES_EXPORT RTCPeerConnection final
+                                     String label,
+                                     const RTCDataChannelInit*,
+                                     ExceptionState&);
++  RTCDataChannel* createDataChannelForBinding(ScriptState*,
++                                              String label,
++                                              const RTCDataChannelInit*,
++                                              ExceptionState&);
+ 
+   RTCDTMFSender* createDTMFSender(MediaStreamTrack*, ExceptionState&);
+ 
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl
+index 688bfad18a81eb58ad4802bc9a6c5e1851bb17ca..fa4c9e1919b4cba71c4240b4659c25fd6ebcfcb8 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl
+@@ -70,11 +70,11 @@ enum RTCPeerConnectionState {
+     [CallWith=ScriptState, RaisesException] Promise<RTCSessionDescriptionInit> createOffer(optional RTCOfferOptions options = {});
+     [CallWith=ScriptState, RaisesException] Promise<RTCSessionDescriptionInit> createAnswer(optional RTCAnswerOptions options = {});
+     [CallWith=ScriptState, RaisesException] Promise<undefined> setLocalDescription(optional RTCSessionDescriptionInit description = {});
+-    readonly attribute RTCSessionDescription? localDescription;
++    [CallWith=ScriptState, ImplementedAs=localDescriptionForBinding] readonly attribute RTCSessionDescription? localDescription;
+     readonly attribute RTCSessionDescription? currentLocalDescription;
+     readonly attribute RTCSessionDescription? pendingLocalDescription;
+     [CallWith=ScriptState, RaisesException] Promise<undefined> setRemoteDescription(RTCSessionDescriptionInit description);
+-    readonly attribute RTCSessionDescription? remoteDescription;
++    [CallWith=ScriptState, ImplementedAs=remoteDescriptionForBinding] readonly attribute RTCSessionDescription? remoteDescription;
+     readonly attribute RTCSessionDescription? currentRemoteDescription;
+     readonly attribute RTCSessionDescription? pendingRemoteDescription;
+     [CallWith=ScriptState, RaisesException, MeasureAs=RTCPeerConnectionAddIceCandidatePromise] Promise<undefined> addIceCandidate(optional RTCIceCandidateInit candidate = {});
+@@ -130,7 +130,7 @@ enum RTCPeerConnectionState {
+ 
+     // https://w3c.github.io/webrtc-pc/#peer-to-peer-data-api
+     readonly attribute RTCSctpTransport? sctp;
+-    [CallWith=ScriptState, RaisesException] RTCDataChannel createDataChannel(USVString label, optional RTCDataChannelInit dataChannelDict = {});
++    [CallWith=ScriptState, RaisesException, ImplementedAs=createDataChannelForBinding] RTCDataChannel createDataChannel(USVString label, optional RTCDataChannelInit dataChannelDict = {});
+     attribute EventHandler ondatachannel;
+ 
+     // Certificate management
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+index 764b01b0dd25f8049e8bc2a289cd74bd67de9755..496ea6216fb8311d708f1498e44e5d3e27a16295 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -43,6 +43,8 @@
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis_error_event.h"
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis_event.h"
+ #include "third_party/blink/renderer/modules/speech/speech_synthesis_voice.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+ 
+ namespace blink {
+@@ -404,4 +406,22 @@ const AtomicString& SpeechSynthesis::InterfaceName() const {
+   return event_target_names::kSpeechSynthesis;
+ }
+ 
++bool SpeechSynthesis::pendingForBinding(ScriptState* script_state) const {
++  bool result = pending();
++  return MaybeBoolOverride(script_state, "speechSynthesis",
++                           "pendingOverride", result);
++}
++
++bool SpeechSynthesis::speakingForBinding(ScriptState* script_state) const {
++  bool result = speaking();
++  return MaybeBoolOverride(script_state, "speechSynthesis",
++                           "speakingOverride", result);
++}
++
++bool SpeechSynthesis::pausedForBinding(ScriptState* script_state) const {
++  bool result = paused();
++  return MaybeBoolOverride(script_state, "speechSynthesis",
++                           "pausedOverride", result);
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.h b/third_party/blink/renderer/modules/speech/speech_synthesis.h
+index f1cb127736c6b58f65a3914c54dcf9b9bd10b75e..1683dc8faf45fc5d8b73d9fdbe3dd848e86c3d88 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.h
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.h
+@@ -61,6 +61,9 @@ class MODULES_EXPORT SpeechSynthesis final
+   bool pending() const;
+   bool speaking() const { return Speaking(); }
+   bool paused() const;
++  bool pendingForBinding(ScriptState*) const;
++  bool speakingForBinding(ScriptState*) const;
++  bool pausedForBinding(ScriptState*) const;
+ 
+   // SpeechSynthesisBase
+   void Speak(const String&, const String&) override;
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.idl b/third_party/blink/renderer/modules/speech/speech_synthesis.idl
+index ef0c0dcef94e387d0e4c42d09352fc0fbabf3373..ae5c66bfc5abff9e0cab0e40fc6570cd654b1f52 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.idl
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.idl
+@@ -29,9 +29,9 @@
+     Exposed=Window,
+     RuntimeEnabled=ScriptedSpeechSynthesis
+ ] interface SpeechSynthesis : EventTarget {
+-    readonly attribute boolean pending;
+-    readonly attribute boolean speaking;
+-    readonly attribute boolean paused;
++    [CallWith=ScriptState, ImplementedAs=pendingForBinding] readonly attribute boolean pending;
++    [CallWith=ScriptState, ImplementedAs=speakingForBinding] readonly attribute boolean speaking;
++    [CallWith=ScriptState, ImplementedAs=pausedForBinding] readonly attribute boolean paused;
+ 
+     [CallWith=ScriptState, Measure] void speak(SpeechSynthesisUtterance utterance);
+     void cancel();
+diff --git a/third_party/blink/renderer/platform/bindings/custom_override_helpers.h b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+index 5f1ea2cd26dbecdbdf97bbf2123bf3336ccf775f..31716e9ed6c44df469bad8ac9b9958332de6b7ea 100644
+--- a/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
++++ b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+@@ -50,6 +50,38 @@ inline v8::Local<v8::Function> GetCustomOverrideFunction(
+   return fn.As<v8::Function>();
+ }
+ 
++// Calls the override function for a boolean value. If an override is
++// registered, passes the original value and returns the override's boolean
++// result; otherwise returns the original value unchanged.
++inline bool MaybeBoolOverride(ScriptState* script_state,
++                               const char* interface_key,
++                               const char* override_name,
++                               bool value) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Boolean::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!override_fn
++           ->Call(context, v8::Undefined(isolate), 1, argv)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsBoolean())
++    return override_result.As<v8::Boolean>()->Value();
++  return value;
++}
++
+ }  // namespace blink
+ 
+ #endif  // THIRD_PARTY_BLINK_RENDERER_PLATFORM_BINDINGS_CUSTOM_OVERRIDE_HELPERS_H_

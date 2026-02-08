@@ -1,0 +1,1067 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 18:58:08 +0530
+Subject: feat: add override hooks for 20 APIs (Batch 12)
+
+APIs: navigator.languages, navigatorUAData.brands/mobile/platform,
+Notification.permission/requestPermission, Event.timeStamp,
+FontFace.load, mediaDevices.enumerateDevices/getUserMedia/getDisplayMedia,
+storageManager.persist/persisted/estimate, navigator.connection,
+navigator.getGamepads, performance.mark/measure,
+RTCPeerConnection.setLocalDescription/setRemoteDescription
+
+diff --git a/third_party/blink/renderer/core/css/font_face.cc b/third_party/blink/renderer/core/css/font_face.cc
+index e52d59820b9c5a5f09a400d2aa59268a811fe6d0..ae5992de6e48a5c81b1cad7456a3484652efb692 100644
+--- a/third_party/blink/renderer/core/css/font_face.cc
++++ b/third_party/blink/renderer/core/css/font_face.cc
+@@ -73,6 +73,7 @@
+ #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer.h"
+ #include "third_party/blink/renderer/core/typed_arrays/dom_array_buffer_view.h"
+ #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/font_family_names.h"
+@@ -595,6 +596,25 @@ ScriptPromise<FontFace> FontFace::load(ScriptState* script_state) {
+   return FontStatusPromise(script_state);
+ }
+ 
++ScriptPromise<FontFace> FontFace::loadForBinding(ScriptState* script_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "fontFace", "loadOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return load(script_state);
++}
++
+ void FontFace::LoadWithCallback(LoadFontCallback* callback) {
+   if (status_ == kUnloaded) {
+     css_font_face_->Load();
+diff --git a/third_party/blink/renderer/core/css/font_face.h b/third_party/blink/renderer/core/css/font_face.h
+index bbd55d1cda6d57bb776b19e2cc71b050a9b1400d..da4d757a65c602a38d19f244ad7f89fe564b5b7d 100644
+--- a/third_party/blink/renderer/core/css/font_face.h
++++ b/third_party/blink/renderer/core/css/font_face.h
+@@ -137,6 +137,7 @@ class CORE_EXPORT FontFace : public ScriptWrappable,
+   }
+ 
+   ScriptPromise<FontFace> load(ScriptState*);
++  ScriptPromise<FontFace> loadForBinding(ScriptState*);
+ 
+   LoadStatusType LoadStatus() const { return status_; }
+   void SetLoadStatus(LoadStatusType);
+diff --git a/third_party/blink/renderer/core/css/font_face.idl b/third_party/blink/renderer/core/css/font_face.idl
+index 6d41a7b0abe9801470c538d80fbbc91038a1879c..304c9feffc943732ba8391c7ac14413103d79f4a 100644
+--- a/third_party/blink/renderer/core/css/font_face.idl
++++ b/third_party/blink/renderer/core/css/font_face.idl
+@@ -60,6 +60,6 @@ typedef (ArrayBuffer or ArrayBufferView) BinaryData;
+ 
+     readonly attribute FontFaceLoadStatus status;
+ 
+-    [CallWith=ScriptState] Promise<FontFace> load();
++    [CallWith=ScriptState, ImplementedAs=loadForBinding] Promise<FontFace> load();
+     [CallWith=ScriptState] readonly attribute Promise<FontFace> loaded;
+ };
+diff --git a/third_party/blink/renderer/core/dom/events/event.cc b/third_party/blink/renderer/core/dom/events/event.cc
+index 011115d96611281899ab8dc12caa35c6088e9029..cd324a90ccfb33065188b0559a7e454b5d99dda5 100644
+--- a/third_party/blink/renderer/core/dom/events/event.cc
++++ b/third_party/blink/renderer/core/dom/events/event.cc
+@@ -41,6 +41,7 @@
+ #include "third_party/blink/renderer/core/timing/window_performance.h"
+ #include "third_party/blink/renderer/core/timing/worker_global_scope_performance.h"
+ #include "third_party/blink/renderer/core/workers/worker_global_scope.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+@@ -408,6 +409,28 @@ double Event::timeStamp(ScriptState* script_state) const {
+   return 0;
+ }
+ 
++double Event::timeStampForBinding(ScriptState* script_state) const {
++  double result = timeStamp(script_state);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "event", "timeStampOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> args[] = {v8::Number::New(isolate, result)};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++      if (override_result->IsNumber())
++        return override_result.As<v8::Number>()->Value();
++    }
++  }
++  return result;
++}
++
+ void Event::setCancelBubble(ScriptState* script_state, bool cancel) {
+   if (cancel)
+     propagation_stopped_ = true;
+diff --git a/third_party/blink/renderer/core/dom/events/event.h b/third_party/blink/renderer/core/dom/events/event.h
+index d62d9cce27ce00410e26c86ae7703f740a0ae3cf..f39f4d3e499e8f243e589e47f009aea56a24aa95 100644
+--- a/third_party/blink/renderer/core/dom/events/event.h
++++ b/third_party/blink/renderer/core/dom/events/event.h
+@@ -217,6 +217,7 @@ class CORE_EXPORT Event : public ScriptWrappable, public DOMOriginUtils {
+   // using the platform timestamp (see |platform_time_stamp_|).
+   // For more info see http://crbug.com/160524
+   double timeStamp(ScriptState*) const;
++  double timeStampForBinding(ScriptState*) const;
+   base::TimeTicks PlatformTimeStamp() const { return platform_time_stamp_; }
+ 
+   void stopPropagation() { propagation_stopped_ = true; }
+diff --git a/third_party/blink/renderer/core/dom/events/event.idl b/third_party/blink/renderer/core/dom/events/event.idl
+index 9c9583279f035c93ea919b16a5d2cb79e5a526d7..df6521a8b42f6f7e3e1e986cf441becb066d63da 100644
+--- a/third_party/blink/renderer/core/dom/events/event.idl
++++ b/third_party/blink/renderer/core/dom/events/event.idl
+@@ -49,7 +49,7 @@
+ 
+     [LegacyUnforgeable] readonly attribute boolean isTrusted;
+ 
+-    [CallWith=ScriptState] readonly attribute DOMHighResTimeStamp timeStamp;
++    [CallWith=ScriptState, ImplementedAs=timeStampForBinding] readonly attribute DOMHighResTimeStamp timeStamp;
+ 
+     [Measure] undefined initEvent(DOMString type, optional boolean bubbles = false, optional boolean cancelable = false);
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+index d233d5db37f21b1ff6dbbf4fd0b5b67c38e9f81a..89f591bbf312d5fa126b68c96780fda46608ec71 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -86,6 +86,35 @@ AtomicString NavigatorLanguage::languageForBinding(ScriptState* script_state) {
+                           "languageOverride"));
+ }
+ 
++const Vector<String>& NavigatorLanguage::languagesForBinding(
++    ScriptState* script_state) {
++  const Vector<String>& result = languages();
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "navigator", "languagesOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Array> v8_array =
++        v8::Array::New(isolate, static_cast<int>(result.size()));
++    for (wtf_size_t i = 0; i < result.size(); ++i) {
++      v8_array
++          ->Set(script_state->GetContext(), i,
++                V8String(isolate, result[i]))
++          .Check();
++    }
++    v8::Local<v8::Value> args[] = {v8_array};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ const Vector<String>& NavigatorLanguage::languages() {
+   EnsureUpdatedLanguage();
+   return languages_;
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.h b/third_party/blink/renderer/core/frame/navigator_language.h
+index 94a5fcef5d042c3c48c298bce8bcd199d9ad6fbb..590ebf67b5dfd99fab8b2c5b80f22953e3293b78 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.h
++++ b/third_party/blink/renderer/core/frame/navigator_language.h
+@@ -20,6 +20,7 @@ class CORE_EXPORT NavigatorLanguage : public GarbageCollectedMixin {
+   AtomicString language();
+   AtomicString languageForBinding(ScriptState*);
+   const Vector<String>& languages();
++  const Vector<String>& languagesForBinding(ScriptState*);
+   bool IsLanguagesDirty() const;
+   void SetLanguagesDirty();
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.idl b/third_party/blink/renderer/core/frame/navigator_language.idl
+index 1e6c18d23785d848ad40957b123efe9754fb0f0f..708cd21180ebd447dfcde71213b1db997e0f5f9d 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.idl
++++ b/third_party/blink/renderer/core/frame/navigator_language.idl
+@@ -6,5 +6,5 @@
+ 
+ interface mixin NavigatorLanguage {
+     [MeasureAs=NavigatorLanguage, CallWith=ScriptState, ImplementedAs=languageForBinding] readonly attribute DOMString language;
+-    [CachedAttribute=IsLanguagesDirty, MeasureAs=NavigatorLanguages] readonly attribute FrozenArray<DOMString> languages;
++    [CachedAttribute=IsLanguagesDirty, MeasureAs=NavigatorLanguages, CallWith=ScriptState, ImplementedAs=languagesForBinding] readonly attribute FrozenArray<DOMString> languages;
+ };
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index bd084e1a7490fd8c500d180711cd6bcf6fe60a4a..e8aaedfb7019831e8f8ef3e1536333ae2095494c 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -327,6 +327,62 @@ const String& NavigatorUAData::platform() const {
+   return g_empty_string;
+ }
+ 
++bool NavigatorUAData::mobileForBinding(ScriptState* script_state) const {
++  bool result = mobile();
++  return MaybeBoolOverride(script_state, "navigatorUAData",
++                           "mobileOverride", result);
++}
++
++const HeapVector<Member<NavigatorUABrandVersion>>&
++NavigatorUAData::brandsForBinding(ScriptState* script_state) const {
++  const HeapVector<Member<NavigatorUABrandVersion>>& result = brands();
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "navigatorUAData", "brandsOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<IDLSequence<NavigatorUABrandVersion>>::ToV8(script_state,
++                                                                result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
++const String& NavigatorUAData::platformForBinding(
++    ScriptState* script_state) const {
++  const String& result = platform();
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "navigatorUAData", "platformOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> args[] = {V8String(isolate, result)};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++      if (override_result->IsString()) {
++        // platformForBinding returns a const reference to an internal member,
++        // so we can't return a modified string here. The override is used
++        // for notification only (Pattern D).
++      }
++    }
++  }
++  return result;
++}
++
+ bool AllowedToCollectHighEntropyValues(ExecutionContext* execution_context) {
+   // To determine whether a document is allowed to use the get high-entropy
+   // client hints returned by navigator.userAgentData.getHighEntropyValues(),
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.h b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+index 1ea8f988cf363de59ca8fbebda0ce290571eb984..5f375ae7dec1015800c5b162382e0cbccf903c80 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.h
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+@@ -86,8 +86,11 @@ class NavigatorUAData : public ScriptWrappable, ExecutionContextClient {
+ 
+   // IDL implementation
+   const HeapVector<Member<NavigatorUABrandVersion>>& brands() const;
++  const HeapVector<Member<NavigatorUABrandVersion>>& brandsForBinding(ScriptState*) const;
+   bool mobile() const;
++  bool mobileForBinding(ScriptState*) const;
+   const String& platform() const;
++  const String& platformForBinding(ScriptState*) const;
+   ScriptPromise<UADataValues> getHighEntropyValues(ScriptState*,
+                                                    const Vector<String>&) const;
+   ScriptObject toJSON(ScriptState*) const;
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.idl b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+index ac83b23a9dcc3e557e91ac78146051bb2eab33b2..b41eb24dbb06519ca33ed77b179cb6ecd7a25939 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.idl
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+@@ -20,9 +20,9 @@ dictionary UAOverrideValues {
+ };
+ 
+ [Exposed=(Window,Worker)] interface NavigatorUAData {
+-  [MeasureAs=NavigatorUAData_Brands] readonly attribute FrozenArray<NavigatorUABrandVersion> brands;
+-  [MeasureAs=NavigatorUAData_Mobile]  readonly attribute boolean mobile;
+-  [MeasureAs=NavigatorUAData_Platform] readonly attribute DOMString platform;
++  [MeasureAs=NavigatorUAData_Brands, CallWith=ScriptState, ImplementedAs=brandsForBinding] readonly attribute FrozenArray<NavigatorUABrandVersion> brands;
++  [MeasureAs=NavigatorUAData_Mobile, CallWith=ScriptState, ImplementedAs=mobileForBinding]  readonly attribute boolean mobile;
++  [MeasureAs=NavigatorUAData_Platform, CallWith=ScriptState, ImplementedAs=platformForBinding] readonly attribute DOMString platform;
+   [CallWith=ScriptState, MeasureAs=NavigatorUAData_GetHighEntropyValues] Promise<UADataValues> getHighEntropyValues(sequence<DOMString> hints);
+   [CallWith=ScriptState, MeasureAs=NavigatorUAData_toJSON] object toJSON();
+ 
+diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
+index 1e990c938f7de787d3205d49ce61c1b01bd1a6a4..35a25ed097ee481ffe2465b38b38d74e1d148511 100644
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -1036,6 +1036,33 @@ PerformanceMark* Performance::mark(ScriptState* script_state,
+   return performance_mark;
+ }
+ 
++PerformanceMark* Performance::markForBinding(
++    ScriptState* script_state,
++    const AtomicString& mark_name,
++    PerformanceMarkOptions* mark_options,
++    ExceptionState& exception_state) {
++  PerformanceMark* result = mark(script_state, mark_name, mark_options,
++                                  exception_state);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "performance", "markOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<PerformanceMark>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ void Performance::ProcessUserFeatureMark(
+     const PerformanceMarkOptions* mark_options) {
+   const ExecutionContext* exec_context = GetExecutionContext();
+@@ -1115,6 +1142,60 @@ PerformanceMeasure* Performance::measure(
+                          std::optional<String>(end), exception_state);
+ }
+ 
++namespace {
++PerformanceMeasure* MaybeNotifyMeasureOverride(ScriptState* script_state,
++                                                PerformanceMeasure* result) {
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "performance", "measureOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<PerformanceMeasure>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++}  // namespace
++
++PerformanceMeasure* Performance::measureForBinding(
++    ScriptState* script_state,
++    const AtomicString& measure_name,
++    ExceptionState& exception_state) {
++  return MaybeNotifyMeasureOverride(
++      script_state, measure(script_state, measure_name, exception_state));
++}
++
++PerformanceMeasure* Performance::measureForBinding(
++    ScriptState* script_state,
++    const AtomicString& measure_name,
++    const V8UnionPerformanceMeasureOptionsOrString* start_or_options,
++    ExceptionState& exception_state) {
++  return MaybeNotifyMeasureOverride(
++      script_state,
++      measure(script_state, measure_name, start_or_options, exception_state));
++}
++
++PerformanceMeasure* Performance::measureForBinding(
++    ScriptState* script_state,
++    const AtomicString& measure_name,
++    const V8UnionPerformanceMeasureOptionsOrString* start_or_options,
++    const String& end,
++    ExceptionState& exception_state) {
++  return MaybeNotifyMeasureOverride(
++      script_state,
++      measure(script_state, measure_name, start_or_options, end,
++              exception_state));
++}
++
+ // |MeasureInternal| exists to unify the arguments from different
+ // `performance.measure()` overloads into a consistent form, then delegate to
+ // |MeasureWithDetail|.
+diff --git a/third_party/blink/renderer/core/timing/performance.h b/third_party/blink/renderer/core/timing/performance.h
+index e12d0413650bb3e8f5192e541840297f92446940..da6ca5a97e92c48007f2e684c37a87bd6f48bcb6 100644
+--- a/third_party/blink/renderer/core/timing/performance.h
++++ b/third_party/blink/renderer/core/timing/performance.h
+@@ -247,6 +247,10 @@ class CORE_EXPORT Performance : public EventTarget {
+                         const AtomicString& mark_name,
+                         PerformanceMarkOptions* mark_options,
+                         ExceptionState&);
++  PerformanceMark* markForBinding(ScriptState*,
++                                  const AtomicString& mark_name,
++                                  PerformanceMarkOptions* mark_options,
++                                  ExceptionState&);
+ 
+   void clearMarks(const AtomicString& mark_name);
+   void clearMarks() { return clearMarks(AtomicString()); }
+@@ -310,6 +314,10 @@ class CORE_EXPORT Performance : public EventTarget {
+       const String& end,
+       ExceptionState& exception_state);
+ 
++  PerformanceMeasure* measureForBinding(ScriptState*, const AtomicString& measure_name, ExceptionState&);
++  PerformanceMeasure* measureForBinding(ScriptState*, const AtomicString& measure_name, const V8UnionPerformanceMeasureOptionsOrString*, ExceptionState&);
++  PerformanceMeasure* measureForBinding(ScriptState*, const AtomicString& measure_name, const V8UnionPerformanceMeasureOptionsOrString*, const String& end, ExceptionState&);
++
+   void clearMeasures(const AtomicString& measure_name);
+   void clearMeasures() { return clearMeasures(AtomicString()); }
+ 
+diff --git a/third_party/blink/renderer/core/timing/performance.idl b/third_party/blink/renderer/core/timing/performance.idl
+index d8354ba6380191191484e8bf888dd51476a1e4f2..2e91087fa18ac12d9268ed4fd016a690285ab172 100644
+--- a/third_party/blink/renderer/core/timing/performance.idl
++++ b/third_party/blink/renderer/core/timing/performance.idl
+@@ -57,9 +57,9 @@ interface Performance : EventTarget {
+ 
+     // User Timing
+     // https://w3c.github.io/user-timing/#extensions-performance-interface
+-    [MeasureAs=UserTiming, CallWith=ScriptState, RaisesException] PerformanceMark mark(DOMString markName, optional PerformanceMarkOptions markOptions = {});
++    [MeasureAs=UserTiming, CallWith=ScriptState, RaisesException, ImplementedAs=markForBinding] PerformanceMark mark(DOMString markName, optional PerformanceMarkOptions markOptions = {});
+     [MeasureAs=UserTiming] void clearMarks(optional DOMString markName);
+-    [MeasureAs=UserTiming, CallWith=ScriptState, RaisesException] PerformanceMeasure measure(DOMString measureName, optional (DOMString or PerformanceMeasureOptions) startOrMeasureOptions = {}, optional DOMString endMark);
++    [MeasureAs=UserTiming, CallWith=ScriptState, RaisesException, ImplementedAs=measureForBinding] PerformanceMeasure measure(DOMString measureName, optional (DOMString or PerformanceMeasureOptions) startOrMeasureOptions = {}, optional DOMString endMark);
+     [MeasureAs=UserTiming] void clearMeasures(optional DOMString measureName);
+ 
+     // TODO(foolip): There is no spec for the Memory Info API, see blink-dev:
+diff --git a/third_party/blink/renderer/modules/gamepad/navigator_gamepad.cc b/third_party/blink/renderer/modules/gamepad/navigator_gamepad.cc
+index f8329c5c815d05c56bc96b13b5bd950ccca6362d..52c86571493ffb8fc19dbbd3819c865a8cb05b18 100644
+--- a/third_party/blink/renderer/modules/gamepad/navigator_gamepad.cc
++++ b/third_party/blink/renderer/modules/gamepad/navigator_gamepad.cc
+@@ -29,6 +29,7 @@
+ #include "device/gamepad/public/cpp/gamepads.h"
+ #include "third_party/blink/public/mojom/frame/user_activation_notification_type.mojom-blink.h"
+ #include "third_party/blink/public/platform/task_type.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_gamepad_mapping_type.h"
+ #include "third_party/blink/renderer/core/dom/events/event.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+@@ -41,6 +42,8 @@
+ #include "third_party/blink/renderer/modules/gamepad/gamepad_dispatcher.h"
+ #include "third_party/blink/renderer/modules/gamepad/gamepad_event.h"
+ #include "third_party/blink/renderer/modules/gamepad/gamepad_raw_input_change_event.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+ #include "third_party/blink/renderer/platform/privacy_budget/identifiability_digest_helpers.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+@@ -113,6 +116,44 @@ HeapVector<Member<Gamepad>> NavigatorGamepad::getGamepads(
+   return result;
+ }
+ 
++// static
++HeapVector<Member<Gamepad>> NavigatorGamepad::getGamepadsForBinding(
++    ScriptState* script_state,
++    Navigator& navigator,
++    ExceptionState& exception_state) {
++  HeapVector<Member<Gamepad>> result =
++      getGamepads(navigator, exception_state);
++  if (exception_state.HadException())
++    return result;
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "navigator", "getGamepadsOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Array> v8_array =
++        v8::Array::New(isolate, static_cast<int>(result.size()));
++    for (wtf_size_t i = 0; i < result.size(); ++i) {
++      v8::Local<v8::Value> item;
++      if (result[i]) {
++        item = ToV8Traits<Gamepad>::ToV8(script_state, result[i].Get());
++      } else {
++        item = v8::Null(isolate);
++      }
++      v8_array->Set(script_state->GetContext(), i, item).Check();
++    }
++    v8::Local<v8::Value> args[] = {v8_array};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ HeapVector<Member<Gamepad>> NavigatorGamepad::Gamepads() {
+   SampleAndCompareGamepadState();
+ 
+diff --git a/third_party/blink/renderer/modules/gamepad/navigator_gamepad.h b/third_party/blink/renderer/modules/gamepad/navigator_gamepad.h
+index 495f7221a4c458521c02497c6db01a7994f8e17b..3f9b6035284cd40800973e54bc0cc386e66fab15 100644
+--- a/third_party/blink/renderer/modules/gamepad/navigator_gamepad.h
++++ b/third_party/blink/renderer/modules/gamepad/navigator_gamepad.h
+@@ -67,6 +67,7 @@ class MODULES_EXPORT NavigatorGamepad final
+   ~NavigatorGamepad() override;
+ 
+   static HeapVector<Member<Gamepad>> getGamepads(Navigator&, ExceptionState&);
++  static HeapVector<Member<Gamepad>> getGamepadsForBinding(ScriptState*, Navigator&, ExceptionState&);
+   HeapVector<Member<Gamepad>> Gamepads();
+ 
+   void Trace(Visitor*) const override;
+diff --git a/third_party/blink/renderer/modules/gamepad/navigator_gamepad.idl b/third_party/blink/renderer/modules/gamepad/navigator_gamepad.idl
+index c49ad66972ef79a930514365121cebc63d5c4cd2..60d8cb4f057d8b6400bfc52e5af3b8b76f165be6 100644
+--- a/third_party/blink/renderer/modules/gamepad/navigator_gamepad.idl
++++ b/third_party/blink/renderer/modules/gamepad/navigator_gamepad.idl
+@@ -22,5 +22,5 @@
+ [
+     ImplementedAs=NavigatorGamepad
+ ] partial interface Navigator {
+-    [MeasureAs=GetGamepads, RaisesException] sequence<Gamepad?> getGamepads();
++    [MeasureAs=GetGamepads, RaisesException, CallWith=ScriptState, ImplementedAs=getGamepadsForBinding] sequence<Gamepad?> getGamepads();
+ };
+diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.cc b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+index b4889339ffcf7d2313e005b8ff28d52098cfb95b..98bd537ae3ecd9d089c539df90bb0877de76bc14 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.cc
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.cc
+@@ -57,6 +57,7 @@
+ #include "third_party/blink/renderer/modules/mediastream/scoped_media_stream_tracer.h"
+ #include "third_party/blink/renderer/modules/mediastream/sub_capture_target.h"
+ #include "third_party/blink/renderer/modules/mediastream/user_media_client.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+@@ -462,6 +463,71 @@ ScriptPromise<IDLSequence<MediaDeviceInfo>> MediaDevices::enumerateDevices(
+   return promise;
+ }
+ 
++ScriptPromise<IDLSequence<MediaDeviceInfo>>
++MediaDevices::enumerateDevicesForBinding(ScriptState* script_state,
++                                          ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "mediaDevices", "enumerateDevicesOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return enumerateDevices(script_state, exception_state);
++}
++
++ScriptPromise<MediaStream> MediaDevices::getUserMediaForBinding(
++    ScriptState* script_state,
++    const UserMediaStreamConstraints* options,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "mediaDevices", "getUserMediaOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return getUserMedia(script_state, options, exception_state);
++}
++
++ScriptPromise<MediaStream> MediaDevices::getDisplayMediaForBinding(
++    ScriptState* script_state,
++    const DisplayMediaStreamOptions* options,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "mediaDevices", "getDisplayMediaOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return getDisplayMedia(script_state, options, exception_state);
++}
++
+ MediaTrackSupportedConstraints* MediaDevices::getSupportedConstraints() const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   return MediaTrackSupportedConstraints::Create();
+diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.h b/third_party/blink/renderer/modules/mediastream/media_devices.h
+index 92c1bcbc1e5abcfcbc2a8abd856a9667a1478511..27e940d4f9824354cb59352823a0a38b58cbef33 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.h
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.h
+@@ -117,6 +117,11 @@ class MODULES_EXPORT MediaDevices final
+                                              const DisplayMediaStreamOptions*,
+                                              ExceptionState&);
+ 
++  // ForBinding wrappers for override hooks
++  ScriptPromise<IDLSequence<MediaDeviceInfo>> enumerateDevicesForBinding(ScriptState*, ExceptionState&);
++  ScriptPromise<MediaStream> getUserMediaForBinding(ScriptState*, const UserMediaStreamConstraints*, ExceptionState&);
++  ScriptPromise<MediaStream> getDisplayMediaForBinding(ScriptState*, const DisplayMediaStreamOptions*, ExceptionState&);
++
+   ScriptPromise<MediaDeviceInfo> selectAudioOutput(
+       ScriptState*,
+       const AudioOutputOptions* options,
+diff --git a/third_party/blink/renderer/modules/mediastream/media_devices.idl b/third_party/blink/renderer/modules/mediastream/media_devices.idl
+index 72474e302d55716ff17971f3e500f7d7336bd529..5de6600d910c7d8423ac832f91ce623793af82da 100644
+--- a/third_party/blink/renderer/modules/mediastream/media_devices.idl
++++ b/third_party/blink/renderer/modules/mediastream/media_devices.idl
+@@ -13,19 +13,21 @@
+ ] interface MediaDevices : EventTarget {
+     attribute EventHandler ondevicechange;
+     [
+-      CallWith = ScriptState, RaisesException, MeasureAs = MediaDevicesEnumerateDevices
++      CallWith = ScriptState, RaisesException, MeasureAs = MediaDevicesEnumerateDevices,
++      ImplementedAs = enumerateDevicesForBinding
+     ] Promise<sequence<MediaDeviceInfo>>
+     enumerateDevices();
+     MediaTrackSupportedConstraints getSupportedConstraints();
+     [
+-      CallWith = ScriptState, RaisesException, MeasureAs = GetUserMediaPromise
++      CallWith = ScriptState, RaisesException, MeasureAs = GetUserMediaPromise,
++      ImplementedAs = getUserMediaForBinding
+     ] Promise<MediaStream>
+     getUserMedia(optional UserMediaStreamConstraints constraints = {});
+ 
+     // https://w3c.github.io/mediacapture-screen-share/#dom-mediadevices-getdisplaymedia
+     [
+       RuntimeEnabled = GetDisplayMedia, CallWith = ScriptState, RaisesException,
+-      MeasureAs = GetDisplayMedia
++      MeasureAs = GetDisplayMedia, ImplementedAs = getDisplayMediaForBinding
+     ] Promise<MediaStream>
+     getDisplayMedia(optional DisplayMediaStreamOptions constraints = {});
+ 
+diff --git a/third_party/blink/renderer/modules/netinfo/navigator_network_information.idl b/third_party/blink/renderer/modules/netinfo/navigator_network_information.idl
+index 15224cae5caba3fbec384933332df510c9d42c7b..e658f4e7bb2854f979150b9f07855c839170c78a 100644
+--- a/third_party/blink/renderer/modules/netinfo/navigator_network_information.idl
++++ b/third_party/blink/renderer/modules/netinfo/navigator_network_information.idl
+@@ -7,7 +7,7 @@
+ [
+     ImplementedAs=NetworkInformation
+ ] interface mixin NavigatorNetworkInformation {
+-    [SameObject, MeasureAs=NetInfo] readonly attribute NetworkInformation connection;
++    [SameObject, MeasureAs=NetInfo, CallWith=ScriptState, ImplementedAs=connectionForBinding] readonly attribute NetworkInformation connection;
+ };
+ 
+ Navigator includes NavigatorNetworkInformation;
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index d49b80df0c8730ea01c45aab32919eb8b537e127..6af9a4dd4212886057fee0822e48fac509065989 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -21,6 +21,7 @@
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ #include "third_party/blink/renderer/platform/weborigin/kurl.h"
+ #include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+@@ -438,6 +439,30 @@ NetworkInformation* NetworkInformation::connection(NavigatorBase& navigator) {
+   return supplement;
+ }
+ 
++NetworkInformation* NetworkInformation::connectionForBinding(
++    ScriptState* script_state,
++    NavigatorBase& navigator) {
++  NetworkInformation* result = connection(navigator);
++  if (!script_state || !script_state->ContextIsValid() || !result)
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "navigator", "connectionOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<NetworkInformation>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ NetworkInformation::NetworkInformation(NavigatorBase& navigator)
+     : ActiveScriptWrappable<NetworkInformation>({}),
+       ExecutionContextLifecycleObserver(navigator.GetExecutionContext()),
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.h b/third_party/blink/renderer/modules/netinfo/network_information.h
+index 0337c90736e409f6823e422580f83c4f31755a24..9df404d2223dfc78d8bbd89081b13fd11d5bc25f 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.h
++++ b/third_party/blink/renderer/modules/netinfo/network_information.h
+@@ -31,6 +31,7 @@ class NetworkInformation final
+  public:
+   // Web-exposed as navigator.connection.
+   static NetworkInformation* connection(NavigatorBase&);
++  static NetworkInformation* connectionForBinding(ScriptState*, NavigatorBase&);
+ 
+   explicit NetworkInformation(NavigatorBase&);
+   ~NetworkInformation() override;
+diff --git a/third_party/blink/renderer/modules/notifications/notification.cc b/third_party/blink/renderer/modules/notifications/notification.cc
+index d7367f1ffa2b11678f6fd24b2daf22d209b90bc2..83cc9c9436d44d67b735d6cca556faa8ba840f44 100644
+--- a/third_party/blink/renderer/modules/notifications/notification.cc
++++ b/third_party/blink/renderer/modules/notifications/notification.cc
+@@ -489,6 +489,56 @@ ScriptPromise<V8NotificationPermission> Notification::requestPermission(
+       script_state, deprecated_callback);
+ }
+ 
++V8NotificationPermission Notification::permissionForBinding(
++    ScriptState* script_state) {
++  ExecutionContext* context = ExecutionContext::From(script_state);
++  V8NotificationPermission result = permission(context);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "notification", "permissionOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> args[] = {V8String(isolate, result.AsString())};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++      if (override_result->IsString()) {
++        String str = ToCoreString(isolate, override_result.As<v8::String>());
++        auto maybe_enum = V8NotificationPermission::Create(str);
++        if (maybe_enum.has_value())
++          return maybe_enum.value();
++      }
++    }
++  }
++  return result;
++}
++
++ScriptPromise<V8NotificationPermission>
++Notification::requestPermissionForBinding(
++    ScriptState* script_state,
++    V8NotificationPermissionCallback* deprecated_callback) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "notification", "requestPermissionOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return requestPermission(script_state, deprecated_callback);
++}
++
+ uint32_t Notification::maxActions() {
+   return kNotificationMaxActions;
+ }
+diff --git a/third_party/blink/renderer/modules/notifications/notification.h b/third_party/blink/renderer/modules/notifications/notification.h
+index 4318142ac84e6e5b043112f5bddb9e66bb342d7b..e93d4a283532fbe24c952c9affa1a2fc3dc2c6aa 100644
+--- a/third_party/blink/renderer/modules/notifications/notification.h
++++ b/third_party/blink/renderer/modules/notifications/notification.h
+@@ -123,9 +123,13 @@ class MODULES_EXPORT Notification final
+   static V8NotificationPermission::Enum PermissionToV8Enum(
+       mojom::blink::PermissionStatus permission);
+   static V8NotificationPermission permission(ExecutionContext* context);
++  static V8NotificationPermission permissionForBinding(ScriptState*);
+   static ScriptPromise<V8NotificationPermission> requestPermission(
+       ScriptState* script_state,
+       V8NotificationPermissionCallback* deprecated_callback = nullptr);
++  static ScriptPromise<V8NotificationPermission> requestPermissionForBinding(
++      ScriptState*,
++      V8NotificationPermissionCallback* deprecated_callback = nullptr);
+ 
+   static uint32_t maxActions();
+   static uint32_t maxActionsForBinding(ScriptState*);
+diff --git a/third_party/blink/renderer/modules/notifications/notification.idl b/third_party/blink/renderer/modules/notifications/notification.idl
+index bd125bb52798afb341cdf8f8d60a84d752781b8f..d3d7d2a6a0e26a4fdb9d6aa6b17fad3e54533c17 100644
+--- a/third_party/blink/renderer/modules/notifications/notification.idl
++++ b/third_party/blink/renderer/modules/notifications/notification.idl
+@@ -45,10 +45,10 @@ enum NotificationPermission {
+     RuntimeEnabled=Notifications
+ ] interface Notification : EventTarget {
+     [CallWith=ExecutionContext, RaisesException, MeasureAs=NotificationCreated] constructor(DOMString title, optional NotificationOptions options = {});
+-    [CallWith=ExecutionContext, MeasureAs=NotificationPermission] static readonly attribute NotificationPermission permission;
++    [CallWith=ScriptState, MeasureAs=NotificationPermission, ImplementedAs=permissionForBinding] static readonly attribute NotificationPermission permission;
+ 
+     // TODO(crbug.com/841185): |deprecatedCallback| is not nullable in the spec.
+-    [CallWith=ScriptState, Exposed=Window, MeasureAs=NotificationPermissionRequested] static Promise<NotificationPermission> requestPermission(optional NotificationPermissionCallback? deprecatedCallback);
++    [CallWith=ScriptState, Exposed=Window, MeasureAs=NotificationPermissionRequested, ImplementedAs=requestPermissionForBinding] static Promise<NotificationPermission> requestPermission(optional NotificationPermissionCallback? deprecatedCallback);
+ 
+     [CallWith=ScriptState, ImplementedAs=maxActionsForBinding] static readonly attribute unsigned long maxActions;
+ 
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+index 461f3c82f0290adccf5229c4f854c7a16b2483fc..7cdda45cae8834df4d8280957f9bb36b4564a406 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.cc
+@@ -1094,6 +1094,52 @@ ScriptPromise<IDLUndefined> RTCPeerConnection::setLocalDescription(
+   return ToResolvedUndefinedPromise(script_state);
+ }
+ 
++ScriptPromise<IDLUndefined>
++RTCPeerConnection::setLocalDescriptionForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "rtcPeerConnection", "setLocalDescriptionOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return setLocalDescription(script_state, exception_state);
++}
++
++ScriptPromise<IDLUndefined>
++RTCPeerConnection::setLocalDescriptionForBinding(
++    ScriptState* script_state,
++    const RTCSessionDescriptionInit* session_description_init,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "rtcPeerConnection", "setLocalDescriptionOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return setLocalDescription(script_state, session_description_init,
++                             exception_state);
++}
++
+ RTCSessionDescription* RTCPeerConnection::localDescription() const {
+   return pending_local_description_ ? pending_local_description_
+                                     : current_local_description_;
+@@ -1224,6 +1270,30 @@ ScriptPromise<IDLUndefined> RTCPeerConnection::setRemoteDescription(
+   return ToResolvedUndefinedPromise(script_state);
+ }
+ 
++ScriptPromise<IDLUndefined>
++RTCPeerConnection::setRemoteDescriptionForBinding(
++    ScriptState* script_state,
++    const RTCSessionDescriptionInit* session_description_init,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "rtcPeerConnection", "setRemoteDescriptionOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return setRemoteDescription(script_state, session_description_init,
++                              exception_state);
++}
++
+ RTCSessionDescription* RTCPeerConnection::remoteDescription() const {
+   return pending_remote_description_ ? pending_remote_description_
+                                      : current_remote_description_;
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
+index a4d75aae20a4c4726a465a48e0eb04a3d7ae34bd..2c1372d06ad5ff474b074f2994161570f2ce1da0 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.h
+@@ -141,6 +141,8 @@ class MODULES_EXPORT RTCPeerConnection final
+       const RTCSessionDescriptionInit*,
+       V8VoidFunction*,
+       V8RTCPeerConnectionErrorCallback* = nullptr);
++  ScriptPromise<IDLUndefined> setLocalDescriptionForBinding(ScriptState*, ExceptionState&);
++  ScriptPromise<IDLUndefined> setLocalDescriptionForBinding(ScriptState*, const RTCSessionDescriptionInit*, ExceptionState&);
+   RTCSessionDescription* localDescription() const;
+   RTCSessionDescription* localDescriptionForBinding(ScriptState*) const;
+   RTCSessionDescription* currentLocalDescription() const;
+@@ -155,6 +157,7 @@ class MODULES_EXPORT RTCPeerConnection final
+       const RTCSessionDescriptionInit*,
+       V8VoidFunction*,
+       V8RTCPeerConnectionErrorCallback* = nullptr);
++  ScriptPromise<IDLUndefined> setRemoteDescriptionForBinding(ScriptState*, const RTCSessionDescriptionInit*, ExceptionState&);
+   RTCSessionDescription* remoteDescription() const;
+   RTCSessionDescription* remoteDescriptionForBinding(ScriptState*) const;
+   RTCSessionDescription* currentRemoteDescription() const;
+diff --git a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl
+index fa4c9e1919b4cba71c4240b4659c25fd6ebcfcb8..c639f0a51d04a1b19846e6555393a32be827f82a 100644
+--- a/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl
++++ b/third_party/blink/renderer/modules/peerconnection/rtc_peer_connection.idl
+@@ -69,11 +69,11 @@ enum RTCPeerConnectionState {
+     [CallWith=ExecutionContext, RaisesException] constructor(optional RTCConfiguration configuration = {});
+     [CallWith=ScriptState, RaisesException] Promise<RTCSessionDescriptionInit> createOffer(optional RTCOfferOptions options = {});
+     [CallWith=ScriptState, RaisesException] Promise<RTCSessionDescriptionInit> createAnswer(optional RTCAnswerOptions options = {});
+-    [CallWith=ScriptState, RaisesException] Promise<undefined> setLocalDescription(optional RTCSessionDescriptionInit description = {});
++    [CallWith=ScriptState, RaisesException, ImplementedAs=setLocalDescriptionForBinding] Promise<undefined> setLocalDescription(optional RTCSessionDescriptionInit description = {});
+     [CallWith=ScriptState, ImplementedAs=localDescriptionForBinding] readonly attribute RTCSessionDescription? localDescription;
+     readonly attribute RTCSessionDescription? currentLocalDescription;
+     readonly attribute RTCSessionDescription? pendingLocalDescription;
+-    [CallWith=ScriptState, RaisesException] Promise<undefined> setRemoteDescription(RTCSessionDescriptionInit description);
++    [CallWith=ScriptState, RaisesException, ImplementedAs=setRemoteDescriptionForBinding] Promise<undefined> setRemoteDescription(RTCSessionDescriptionInit description);
+     [CallWith=ScriptState, ImplementedAs=remoteDescriptionForBinding] readonly attribute RTCSessionDescription? remoteDescription;
+     readonly attribute RTCSessionDescription? currentRemoteDescription;
+     readonly attribute RTCSessionDescription? pendingRemoteDescription;
+diff --git a/third_party/blink/renderer/modules/quota/storage_manager.cc b/third_party/blink/renderer/modules/quota/storage_manager.cc
+index d8614d02a83810dde70cda2ac22fc9b7dc707e85..6c583c378d5257f8715540c68956cd756d1ae8e6 100644
+--- a/third_party/blink/renderer/modules/quota/storage_manager.cc
++++ b/third_party/blink/renderer/modules/quota/storage_manager.cc
+@@ -20,6 +20,7 @@
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+ #include "third_party/blink/renderer/modules/permissions/permission_utils.h"
+ #include "third_party/blink/renderer/modules/quota/quota_utils.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_throw_exception.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+@@ -101,6 +102,69 @@ StorageManager::StorageManager(ExecutionContext* execution_context)
+ 
+ StorageManager::~StorageManager() = default;
+ 
++ScriptPromise<IDLBoolean> StorageManager::persistForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "storageManager", "persistOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return persist(script_state, exception_state);
++}
++
++ScriptPromise<IDLBoolean> StorageManager::persistedForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "storageManager", "persistedOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return persisted(script_state, exception_state);
++}
++
++ScriptPromise<StorageEstimate> StorageManager::estimateForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "storageManager", "estimateOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return estimate(script_state, exception_state);
++}
++
+ ScriptPromise<IDLBoolean> StorageManager::persist(
+     ScriptState* script_state,
+     ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/modules/quota/storage_manager.h b/third_party/blink/renderer/modules/quota/storage_manager.h
+index aa96ce2202c5b0241f2b80a4e4081ef9dfa201f1..fa99d2562503dcc121bef8cacc6db2e61572bc14 100644
+--- a/third_party/blink/renderer/modules/quota/storage_manager.h
++++ b/third_party/blink/renderer/modules/quota/storage_manager.h
+@@ -31,6 +31,11 @@ class StorageManager final : public ScriptWrappable {
+ 
+   ScriptPromise<StorageEstimate> estimate(ScriptState*, ExceptionState&);
+ 
++  // ForBinding wrappers for override hooks
++  ScriptPromise<IDLBoolean> persistedForBinding(ScriptState*, ExceptionState&);
++  ScriptPromise<IDLBoolean> persistForBinding(ScriptState*, ExceptionState&);
++  ScriptPromise<StorageEstimate> estimateForBinding(ScriptState*, ExceptionState&);
++
+   // ScriptWrappable:
+   void Trace(Visitor* visitor) const override;
+ 
+diff --git a/third_party/blink/renderer/modules/quota/storage_manager.idl b/third_party/blink/renderer/modules/quota/storage_manager.idl
+index 11ebb9c2fabbcdc9e0b125c94f893b6d50a9c0d5..99a57d7e6d17154f403dd230cb18e9dee7e458a8 100644
+--- a/third_party/blink/renderer/modules/quota/storage_manager.idl
++++ b/third_party/blink/renderer/modules/quota/storage_manager.idl
+@@ -8,8 +8,8 @@
+     SecureContext,
+     Exposed=(Window,Worker)
+ ] interface StorageManager {
+-    [CallWith=ScriptState, MeasureAs=DurableStoragePersisted, RaisesException] Promise<boolean> persisted();
+-    [Exposed=Window, CallWith=ScriptState, MeasureAs=DurableStoragePersist, RaisesException] Promise<boolean> persist();
++    [CallWith=ScriptState, MeasureAs=DurableStoragePersisted, RaisesException, ImplementedAs=persistedForBinding] Promise<boolean> persisted();
++    [Exposed=Window, CallWith=ScriptState, MeasureAs=DurableStoragePersist, RaisesException, ImplementedAs=persistForBinding] Promise<boolean> persist();
+ 
+-    [CallWith=ScriptState, MeasureAs=DurableStorageEstimate, RaisesException] Promise<StorageEstimate> estimate();
++    [CallWith=ScriptState, MeasureAs=DurableStorageEstimate, RaisesException, ImplementedAs=estimateForBinding] Promise<StorageEstimate> estimate();
+ };

@@ -1,0 +1,864 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 08:51:28 +0530
+Subject: feat: add override hooks for 10 APIs (Batch 7)
+
+Navigator.appVersion, Navigator.platform, Navigator.language,
+Navigator.doNotTrack, HTMLCanvasElement.toDataURL,
+Notification.maxActions, Performance.now,
+Range.getBoundingClientRect, SVGGeometryElement.getTotalLength,
+SVGTextContentElement.getComputedTextLength
+
+diff --git a/third_party/blink/renderer/core/dom/range.cc b/third_party/blink/renderer/core/dom/range.cc
+index d5cbdc34634ecf3f66b78bfe264cbabb5a4b4553..a807c82965cb3bd56eb4fbda0bf3e51d341b9b18 100644
+--- a/third_party/blink/renderer/core/dom/range.cc
++++ b/third_party/blink/renderer/core/dom/range.cc
+@@ -61,6 +61,9 @@
+ #include "third_party/blink/renderer/core/page/scrolling/sync_scroll_attempt_heuristic.h"
+ #include "third_party/blink/renderer/core/svg/svg_svg_element.h"
+ #include "third_party/blink/renderer/core/trustedtypes/trusted_types_util.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+@@ -1664,6 +1667,33 @@ DOMRect* Range::getBoundingClientRect() const {
+   return DOMRect::FromRectF(BoundingRect());
+ }
+ 
++DOMRect* Range::getBoundingClientRectForBinding(
++    ScriptState* script_state) const {
++  DOMRect* result = getBoundingClientRect();
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "range",
++                                "getBoundingClientRectOverride");
++  if (override_fn.IsEmpty())
++    return result;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> result_value =
++      ToV8Traits<DOMRect>::ToV8(script_state, result);
++  v8::Local<v8::Value> argv[] = {result_value};
++  v8::TryCatch try_catch(isolate);
++  std::ignore = V8ScriptRunner::CallFunction(
++      override_fn, ExecutionContext::From(script_state),
++      context->Global(), 1, argv, isolate);
++  return result;
++}
++
+ // TODO(editing-dev): We should make
+ // |Document::AdjustQuadsForScrollAndAbsoluteZoom()| as const function
+ // and takes |const LayoutObject&|.
+diff --git a/third_party/blink/renderer/core/dom/range.h b/third_party/blink/renderer/core/dom/range.h
+index 5dedc0545be7d1a87ca52cbdfade43434e822e5c..5a1d6ca96be2d2cf3ea2c9ff24e7b55a218aa732 100644
+--- a/third_party/blink/renderer/core/dom/range.h
++++ b/third_party/blink/renderer/core/dom/range.h
+@@ -167,6 +167,7 @@ class CORE_EXPORT Range final : public AbstractRange {
+ 
+   DOMRectList* getClientRects() const;
+   DOMRect* getBoundingClientRect() const;
++  DOMRect* getBoundingClientRectForBinding(ScriptState*) const;
+ 
+   static Node* CheckNodeWOffset(Node*, unsigned offset, ExceptionState&);
+ 
+diff --git a/third_party/blink/renderer/core/dom/range.idl b/third_party/blink/renderer/core/dom/range.idl
+index b1d96acec2c2772d5b8e9c032a5a3b4668394ef2..8b5a56a61dc24e1a25dc97eec15e5752ff3caf77 100644
+--- a/third_party/blink/renderer/core/dom/range.idl
++++ b/third_party/blink/renderer/core/dom/range.idl
+@@ -60,7 +60,7 @@
+     // CSSOM View Module
+     // https://drafts.csswg.org/cssom-view/#extensions-to-the-range-interface
+     [Measure] DOMRectList getClientRects();
+-    [Measure] DOMRect getBoundingClientRect();
++    [Measure, CallWith=ScriptState, ImplementedAs=getBoundingClientRectForBinding] DOMRect getBoundingClientRect();
+ 
+     // DOM Parsing and Serialization
+     // https://w3c.github.io/DOM-Parsing/#extensions-to-the-range-interface
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.cc b/third_party/blink/renderer/core/frame/navigator_id.cc
+index 2602354b534a32ac7f3fbba01c7381ec05da05cf..c2be1e82365f1348ad8a7efde74d7a57e9b9fce9 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.cc
++++ b/third_party/blink/renderer/core/frame/navigator_id.cc
+@@ -34,6 +34,10 @@
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+ 
+ #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_WIN)
+@@ -44,6 +48,42 @@
+ 
+ namespace blink {
+ 
++namespace {
++String MaybeStringOverride(ScriptState* script_state,
++                           const String& value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {V8String(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNullOrUndefined())
++    return value;
++  v8::Local<v8::String> override_string;
++  if (!override_result->ToString(context).ToLocal(&override_string))
++    return value;
++  return ToCoreString(isolate, override_string);
++}
++}  // namespace
++
+ String NavigatorID::appCodeName() {
+   return "Mozilla";
+ }
+@@ -83,6 +123,16 @@ String NavigatorID::platform() const {
+ #endif
+ }
+ 
++String NavigatorID::appVersionForBinding(ScriptState* script_state) {
++  return MaybeStringOverride(script_state, appVersion(), "navigator",
++                             "appVersionOverride");
++}
++
++String NavigatorID::platformForBinding(ScriptState* script_state) const {
++  return MaybeStringOverride(script_state, platform(), "navigator",
++                             "platformOverride");
++}
++
+ String NavigatorID::product() {
+   return "Gecko";
+ }
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.h b/third_party/blink/renderer/core/frame/navigator_id.h
+index 5edabdb4d917a7a8bae9dd2b41f32e4176b1e41b..050b6f96b48d4526905b762bc69bd69af9247ae6 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.h
++++ b/third_party/blink/renderer/core/frame/navigator_id.h
+@@ -43,7 +43,9 @@ class CORE_EXPORT NavigatorID {
+   String appCodeName();
+   String appName();
+   String appVersion();
++  String appVersionForBinding(ScriptState*);
+   virtual String platform() const;
++  String platformForBinding(ScriptState*) const;
+   String product();
+   virtual String userAgent(ScriptState* script_state) const = 0;
+ };
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.idl b/third_party/blink/renderer/core/frame/navigator_id.idl
+index 32332c4d2ff2966f999792a78991cd86881981ff..811340ca0462bbfdc20371d99199a26cbb2a346d 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.idl
++++ b/third_party/blink/renderer/core/frame/navigator_id.idl
+@@ -33,8 +33,8 @@
+ interface mixin NavigatorID {
+     readonly attribute DOMString appCodeName; // constant "Mozilla"
+     readonly attribute DOMString appName; // constant "Netscape"
+-    [MeasureAs=NavigatorAppVersion] readonly attribute DOMString appVersion;
+-    [MeasureAs=NavigatorPlatform] readonly attribute DOMString platform;
++    [MeasureAs=NavigatorAppVersion, CallWith=ScriptState, ImplementedAs=appVersionForBinding] readonly attribute DOMString appVersion;
++    [MeasureAs=NavigatorPlatform, CallWith=ScriptState, ImplementedAs=platformForBinding] readonly attribute DOMString platform;
+     readonly attribute DOMString product; // constant "Gecko"
+     // https://www.w3.org/Bugs/Public/show_bug.cgi?id=22555
+     // boolean taintEnabled(); // constant false
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+index 4907ba005a08a576abe1d9f6bd0c4077f178cc34..d233d5db37f21b1ff6dbbf4fd0b5b67c38e9f81a 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -7,8 +7,11 @@
+ #include "base/command_line.h"
+ #include "services/network/public/cpp/features.h"
+ #include "third_party/blink/public/common/switches.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/language.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+ 
+@@ -37,10 +40,52 @@ Vector<String> ParseAndSanitize(const String& accept_languages) {
+ NavigatorLanguage::NavigatorLanguage(ExecutionContext* execution_context)
+     : execution_context_(execution_context) {}
+ 
++namespace {
++String MaybeStringOverride(ScriptState* script_state,
++                           const String& value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {V8String(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNullOrUndefined())
++    return value;
++  v8::Local<v8::String> override_string;
++  if (!override_result->ToString(context).ToLocal(&override_string))
++    return value;
++  return ToCoreString(isolate, override_string);
++}
++}  // namespace
++
+ AtomicString NavigatorLanguage::language() {
+   return AtomicString(languages().front());
+ }
+ 
++AtomicString NavigatorLanguage::languageForBinding(ScriptState* script_state) {
++  return AtomicString(
++      MaybeStringOverride(script_state, language(), "navigator",
++                          "languageOverride"));
++}
++
+ const Vector<String>& NavigatorLanguage::languages() {
+   EnsureUpdatedLanguage();
+   return languages_;
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.h b/third_party/blink/renderer/core/frame/navigator_language.h
+index c57878454058aa751c13930db1927556995f8ef4..94a5fcef5d042c3c48c298bce8bcd199d9ad6fbb 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.h
++++ b/third_party/blink/renderer/core/frame/navigator_language.h
+@@ -11,11 +11,14 @@
+ 
+ namespace blink {
+ 
++class ScriptState;
++
+ class CORE_EXPORT NavigatorLanguage : public GarbageCollectedMixin {
+  public:
+   explicit NavigatorLanguage(ExecutionContext*);
+ 
+   AtomicString language();
++  AtomicString languageForBinding(ScriptState*);
+   const Vector<String>& languages();
+   bool IsLanguagesDirty() const;
+   void SetLanguagesDirty();
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.idl b/third_party/blink/renderer/core/frame/navigator_language.idl
+index 5f1169511856c905ab53823c43b4e6278e123647..1e6c18d23785d848ad40957b123efe9754fb0f0f 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.idl
++++ b/third_party/blink/renderer/core/frame/navigator_language.idl
+@@ -5,6 +5,6 @@
+ // https://html.spec.whatwg.org/C/#language-preferences
+ 
+ interface mixin NavigatorLanguage {
+-    [MeasureAs=NavigatorLanguage] readonly attribute DOMString language;
++    [MeasureAs=NavigatorLanguage, CallWith=ScriptState, ImplementedAs=languageForBinding] readonly attribute DOMString language;
+     [CachedAttribute=IsLanguagesDirty, MeasureAs=NavigatorLanguages] readonly attribute FrozenArray<DOMString> languages;
+ };
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index 141133227ba604db526622bdf0860070a08be104..243479622a574ea431bf6e9f418a4ca5697a4e84 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -57,6 +57,7 @@
+ #include "third_party/blink/public/platform/task_type.h"
+ #include "third_party/blink/public/resources/grit/blink_image_resources.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_controller.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_image_bitmap_options.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_image_encode_options.h"
+ #include "third_party/blink/renderer/core/css/css_font_selector.h"
+@@ -105,7 +106,9 @@
+ #include "third_party/blink/renderer/core/paint/paint_layer.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/resize_observer/resize_observer_utilities.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/fonts/plain_text_painter.h"
+ #include "third_party/blink/renderer/platform/graphics/canvas_resource.h"
+ #include "third_party/blink/renderer/platform/graphics/canvas_resource_dispatcher.h"
+@@ -1375,6 +1378,52 @@ String HTMLCanvasElement::toDataURL(const String& mime_type,
+   return ToDataURLInternal(mime_type, quality, kBackBuffer);
+ }
+ 
++namespace {
++String MaybeStringOverride(ScriptState* script_state,
++                           const String& value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {V8String(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNullOrUndefined())
++    return value;
++  v8::Local<v8::String> override_string;
++  if (!override_result->ToString(context).ToLocal(&override_string))
++    return value;
++  return ToCoreString(isolate, override_string);
++}
++}  // namespace
++
++String HTMLCanvasElement::toDataURLForBinding(
++    ScriptState* script_state,
++    const String& mime_type,
++    const ScriptValue& quality_argument,
++    ExceptionState& exception_state) const {
++  return MaybeStringOverride(
++      script_state, toDataURL(mime_type, quality_argument, exception_state),
++      "htmlCanvasElement", "toDataURLOverride");
++}
++
+ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+                                const String& mime_type,
+                                const ScriptValue& quality_argument,
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.h b/third_party/blink/renderer/core/html/canvas/html_canvas_element.h
+index ef0f7a1ea6dbe572d8860f0059a113d7bbccb0d9..ff46dfc0475b4ad1a37ef7f3d0cef93326c1b0dd 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.h
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.h
+@@ -129,6 +129,16 @@ class CORE_EXPORT HTMLCanvasElement final
+                    ExceptionState& exception_state) const {
+     return toDataURL(mime_type, ScriptValue(), exception_state);
+   }
++  String toDataURLForBinding(ScriptState*,
++                             const String& mime_type,
++                             const ScriptValue& quality_argument,
++                             ExceptionState&) const;
++  String toDataURLForBinding(ScriptState* script_state,
++                             const String& mime_type,
++                             ExceptionState& exception_state) const {
++    return toDataURLForBinding(script_state, mime_type, ScriptValue(),
++                               exception_state);
++  }
+ 
+   void toBlob(V8BlobCallback*,
+               const String& mime_type,
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl b/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl
+index dcd5c3349775da59c644b829a86948586574952f..249cb01f7bd2971290ca62355326b0f38c7481be 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl
+@@ -39,7 +39,7 @@
+     [RuntimeEnabled=CanvasDrawElement] attribute boolean layoutSubtree;
+     [RuntimeEnabled=CanvasDrawElement, RaisesException] DOMMatrix getElementTransform(Element element, DOMMatrix draw_transform);
+ 
+-    [MeasureAs=CanvasToDataURL, RaisesException] DOMString toDataURL(optional DOMString type = "image/png", optional any quality);
++    [MeasureAs=CanvasToDataURL, RaisesException, CallWith=ScriptState, ImplementedAs=toDataURLForBinding] DOMString toDataURL(optional DOMString type = "image/png", optional any quality);
+ 
+     [MeasureAs=CanvasToBlob, RaisesException] void toBlob(BlobCallback _callback, optional DOMString type = "image/png", optional any quality);
+ 
+diff --git a/third_party/blink/renderer/core/svg/svg_geometry_element.cc b/third_party/blink/renderer/core/svg/svg_geometry_element.cc
+index 9081e62f92222ea2094d8fe8ab0bdc3f2ae88ace..d6e1a61d855bf2d2a37ff4cc76a200548bfb4a6e 100644
+--- a/third_party/blink/renderer/core/svg/svg_geometry_element.cc
++++ b/third_party/blink/renderer/core/svg/svg_geometry_element.cc
+@@ -38,6 +38,9 @@
+ #include "third_party/blink/renderer/core/svg/svg_animated_number.h"
+ #include "third_party/blink/renderer/core/svg/svg_point_tear_off.h"
+ #include "third_party/blink/renderer/core/svg_names.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/geometry/path_builder.h"
+ #include "third_party/blink/renderer/platform/geometry/stroke_data.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -184,6 +187,48 @@ float SVGGeometryElement::getTotalLength(ExceptionState& exception_state) {
+   return AsPath().length();
+ }
+ 
++namespace {
++float MaybeFloatOverride(ScriptState* script_state,
++                         float value,
++                         const char* interface_key,
++                         const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<float>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++}  // namespace
++
++float SVGGeometryElement::getTotalLengthForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  return MaybeFloatOverride(script_state,
++                            getTotalLength(exception_state),
++                            "svgGeometryElement", "getTotalLengthOverride");
++}
++
+ SVGPointTearOff* SVGGeometryElement::getPointAtLength(
+     float length,
+     ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/core/svg/svg_geometry_element.h b/third_party/blink/renderer/core/svg/svg_geometry_element.h
+index 2e61c4be693e3eeafed588d8d819c2e48c2083e5..ae3f727a38e3dd35a69493644444a5dcbf0db414 100644
+--- a/third_party/blink/renderer/core/svg/svg_geometry_element.h
++++ b/third_party/blink/renderer/core/svg/svg_geometry_element.h
+@@ -39,6 +39,7 @@ class AffineTransform;
+ class DOMPointInit;
+ class Path;
+ class PathBuilder;
++class ScriptState;
+ class SVGAnimatedNumber;
+ class SVGPointTearOff;
+ 
+@@ -57,6 +58,7 @@ class SVGGeometryElement : public SVGGraphicsElement {
+   SVGAnimatedNumber* pathLength() const { return path_length_.Get(); }
+ 
+   virtual float getTotalLength(ExceptionState&);
++  float getTotalLengthForBinding(ScriptState*, ExceptionState&);
+   virtual SVGPointTearOff* getPointAtLength(float distance, ExceptionState&);
+ 
+   float AuthorPathLength() const;
+diff --git a/third_party/blink/renderer/core/svg/svg_geometry_element.idl b/third_party/blink/renderer/core/svg/svg_geometry_element.idl
+index 4ec690e5d0964caedda354d02514bd3219a0b169..82b6d6928e60b4ea77da53035ca292b2fe9ed64f 100644
+--- a/third_party/blink/renderer/core/svg/svg_geometry_element.idl
++++ b/third_party/blink/renderer/core/svg/svg_geometry_element.idl
+@@ -36,6 +36,6 @@ interface SVGGeometryElement : SVGGraphicsElement {
+ 
+     [Measure] boolean isPointInFill(optional DOMPointInit point = {});
+     [Measure] boolean isPointInStroke(optional DOMPointInit point = {});
+-    [Measure, RaisesException] float getTotalLength();
++    [Measure, RaisesException, CallWith=ScriptState, ImplementedAs=getTotalLengthForBinding] float getTotalLength();
+     [Measure, RaisesException] SVGPoint getPointAtLength(float distance);
+ };
+diff --git a/third_party/blink/renderer/core/svg/svg_text_content_element.cc b/third_party/blink/renderer/core/svg/svg_text_content_element.cc
+index 817e8f2d1290db30acae097b4a58243e3b9444f3..53cbc1bf9c7c22a1767ed331d0db7044ad99bab9 100644
+--- a/third_party/blink/renderer/core/svg/svg_text_content_element.cc
++++ b/third_party/blink/renderer/core/svg/svg_text_content_element.cc
+@@ -34,6 +34,9 @@
+ #include "third_party/blink/renderer/core/svg/svg_rect_tear_off.h"
+ #include "third_party/blink/renderer/core/svg_names.h"
+ #include "third_party/blink/renderer/core/xml_names.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -119,6 +122,47 @@ float SVGTextContentElement::getComputedTextLength() {
+   return 0;
+ }
+ 
++namespace {
++float MaybeFloatOverride(ScriptState* script_state,
++                         float value,
++                         const char* interface_key,
++                         const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<float>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++}  // namespace
++
++float SVGTextContentElement::getComputedTextLengthForBinding(
++    ScriptState* script_state) {
++  return MaybeFloatOverride(script_state, getComputedTextLength(),
++                            "svgTextContentElement",
++                            "getComputedTextLengthOverride");
++}
++
+ float SVGTextContentElement::getSubStringLength(
+     unsigned charnum,
+     unsigned nchars,
+diff --git a/third_party/blink/renderer/core/svg/svg_text_content_element.h b/third_party/blink/renderer/core/svg/svg_text_content_element.h
+index 5421c37bb9156929a88243fe536ae1aa289fbda5..18e612f2e8226c631da77c362b60e7b3423d335c 100644
+--- a/third_party/blink/renderer/core/svg/svg_text_content_element.h
++++ b/third_party/blink/renderer/core/svg/svg_text_content_element.h
+@@ -31,6 +31,7 @@ namespace blink {
+ class DOMPointInit;
+ class ExceptionState;
+ class LineLayoutItem;
++class ScriptState;
+ class SVGAnimatedLength;
+ class SVGPointTearOff;
+ 
+@@ -54,6 +55,7 @@ class CORE_EXPORT SVGTextContentElement : public SVGGraphicsElement {
+ 
+   unsigned getNumberOfChars();
+   float getComputedTextLength();
++  float getComputedTextLengthForBinding(ScriptState*);
+   float getSubStringLength(unsigned charnum, unsigned nchars, ExceptionState&);
+   SVGPointTearOff* getStartPositionOfChar(unsigned charnum, ExceptionState&);
+   SVGPointTearOff* getEndPositionOfChar(unsigned charnum, ExceptionState&);
+diff --git a/third_party/blink/renderer/core/svg/svg_text_content_element.idl b/third_party/blink/renderer/core/svg/svg_text_content_element.idl
+index b7ea8ab3c7221fe09662d782ab0ee657eb3a3027..c9a201f3868dd6c4ecb2a675ca3b98074439feee 100644
+--- a/third_party/blink/renderer/core/svg/svg_text_content_element.idl
++++ b/third_party/blink/renderer/core/svg/svg_text_content_element.idl
+@@ -36,7 +36,7 @@ interface SVGTextContentElement : SVGGraphicsElement {
+     readonly attribute SVGAnimatedEnumeration lengthAdjust;
+ 
+     long getNumberOfChars();
+-    [Measure] float getComputedTextLength();
++    [Measure, CallWith=ScriptState, ImplementedAs=getComputedTextLengthForBinding] float getComputedTextLength();
+     [Measure, RaisesException] float getSubStringLength(unsigned long charnum, unsigned long nchars);
+     [Measure, RaisesException] SVGPoint getStartPositionOfChar(unsigned long charnum);
+     [Measure, RaisesException] SVGPoint getEndPositionOfChar(unsigned long charnum);
+diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
+index 2af0cc841ae9e1a723a67d1f12e1a75beb29f260..709c95849f9c2f948171b451ee828782c7fe9b22 100644
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -50,6 +50,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise_resolver.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_object_builder.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_performance_mark_options.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_performance_measure_options.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_profiler_init_options.h"
+@@ -92,6 +93,7 @@
+ #include "third_party/blink/renderer/core/timing/profiler_group.h"
+ #include "third_party/blink/renderer/core/timing/soft_navigation_entry.h"
+ #include "third_party/blink/renderer/core/timing/time_clamper.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/heap/persistent.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+@@ -1274,6 +1276,45 @@ DOMHighResTimeStamp Performance::now() const {
+   return MonotonicTimeToDOMHighResTimeStamp(tick_clock_->NowTicks());
+ }
+ 
++namespace {
++double MaybeDoubleOverride(ScriptState* script_state,
++                           double value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Number::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return override_result.As<v8::Number>()->Value();
++  return value;
++}
++}  // namespace
++
++DOMHighResTimeStamp Performance::nowForBinding(
++    ScriptState* script_state) const {
++  return MaybeDoubleOverride(script_state, now(), "performance",
++                             "nowOverride");
++}
++
+ // static
+ bool Performance::CanExposeNode(Node* node) {
+   if (!node || !node->isConnected() || node->IsInShadowTree())
+diff --git a/third_party/blink/renderer/core/timing/performance.h b/third_party/blink/renderer/core/timing/performance.h
+index f858f21dbe98e8e8cd2e66f953ca77f1ff0894a3..6f2128aa22ef5087cdc53c608306b38ae4ca67bd 100644
+--- a/third_party/blink/renderer/core/timing/performance.h
++++ b/third_party/blink/renderer/core/timing/performance.h
+@@ -145,6 +145,7 @@ class CORE_EXPORT Performance : public EventTarget {
+   DOMHighResTimeStamp MonotonicTimeToDOMHighResTimeStamp(base::TimeTicks) const;
+ 
+   DOMHighResTimeStamp now() const;
++  DOMHighResTimeStamp nowForBinding(ScriptState*) const;
+ 
+   // High Resolution Time Level 3 timeOrigin.
+   // (https://www.w3.org/TR/hr-time-3/#dom-performance-timeorigin)
+diff --git a/third_party/blink/renderer/core/timing/performance.idl b/third_party/blink/renderer/core/timing/performance.idl
+index 11c4cec19026539bc4879c369f26db267dd90aea..f80549bab7d6b2221fe2d77e801848052660e35e 100644
+--- a/third_party/blink/renderer/core/timing/performance.idl
++++ b/third_party/blink/renderer/core/timing/performance.idl
+@@ -35,7 +35,7 @@
+ // should have a default value.
+ [Exposed=(Window,Worker)]
+ interface Performance : EventTarget {
+-    [Affects=Nothing, NoAllocDirectCall] DOMHighResTimeStamp now();
++    [CallWith=ScriptState, ImplementedAs=nowForBinding] DOMHighResTimeStamp now();
+     readonly attribute DOMHighResTimeStamp timeOrigin;
+ 
+     // Performance Timeline
+diff --git a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
+index 73fe45f6506839b89055a98a6a19e932387b9641..ed2911f5b9ce144ea6b4f623a4a1ecd2d7c3b756 100644
+--- a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
++++ b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.cc
+@@ -30,12 +30,52 @@
+ 
+ #include "third_party/blink/renderer/modules/donottrack/navigator_do_not_track.h"
+ 
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/local_frame_client.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ 
+ namespace blink {
++
++namespace {
++String MaybeStringOverride(ScriptState* script_state,
++                           const String& value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {V8String(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNullOrUndefined())
++    return value;
++  v8::Local<v8::String> override_string;
++  if (!override_result->ToString(context).ToLocal(&override_string))
++    return value;
++  return ToCoreString(isolate, override_string);
++}
++}  // namespace
++
+ namespace NavigatorDoNotTrack {
+ 
+ String doNotTrack(Navigator& navigator) {
+@@ -43,5 +83,10 @@ String doNotTrack(Navigator& navigator) {
+   return window ? window->GetFrame()->Client()->DoNotTrackValue() : String();
+ }
+ 
++String doNotTrackForBinding(ScriptState* script_state, Navigator& navigator) {
++  return MaybeStringOverride(script_state, doNotTrack(navigator), "navigator",
++                             "doNotTrackOverride");
++}
++
+ }  // namespace NavigatorDoNotTrack
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.h b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.h
+index f9ebf870d228a556ecba5738f7cfead1e919f14e..0064156b083b69921e439c7d863cddfbd7ade3f2 100644
+--- a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.h
++++ b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.h
+@@ -36,9 +36,11 @@
+ 
+ namespace blink {
+ class Navigator;
++class ScriptState;
+ 
+ namespace NavigatorDoNotTrack {
+ String doNotTrack(Navigator&);
++String doNotTrackForBinding(ScriptState*, Navigator&);
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.idl b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.idl
+index 3397e75b982ae13fc36c859d661cfbbc3a8d12b0..3862611e1cf395410e6ceea716f2bb13c6614311 100644
+--- a/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.idl
++++ b/third_party/blink/renderer/modules/donottrack/navigator_do_not_track.idl
+@@ -31,5 +31,5 @@
+ [
+     ImplementedAs=NavigatorDoNotTrack
+ ] partial interface Navigator {
+-    [MeasureAs=NavigatorDoNotTrack] readonly attribute DOMString? doNotTrack;
++    [MeasureAs=NavigatorDoNotTrack, CallWith=ScriptState, ImplementedAs=doNotTrackForBinding] readonly attribute DOMString? doNotTrack;
+ };
+diff --git a/third_party/blink/renderer/modules/notifications/notification.cc b/third_party/blink/renderer/modules/notifications/notification.cc
+index 0cb575220b47cdecd87a31dd004d4a17d41a130a..d7367f1ffa2b11678f6fd24b2daf22d209b90bc2 100644
+--- a/third_party/blink/renderer/modules/notifications/notification.cc
++++ b/third_party/blink/renderer/modules/notifications/notification.cc
+@@ -41,6 +41,7 @@
+ #include "third_party/blink/public/platform/task_type.h"
+ #include "third_party/blink/renderer/bindings/core/v8/serialization/serialized_script_value_factory.h"
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_notification_action.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_notification_options.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -56,6 +57,7 @@
+ #include "third_party/blink/renderer/modules/notifications/notification_manager.h"
+ #include "third_party/blink/renderer/modules/notifications/notification_resources_loader.h"
+ #include "third_party/blink/renderer/modules/notifications/timestamp_trigger.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/source_location.h"
+@@ -491,6 +493,45 @@ uint32_t Notification::maxActions() {
+   return kNotificationMaxActions;
+ }
+ 
++namespace {
++unsigned MaybeUnsignedOverride(ScriptState* script_state,
++                               unsigned value,
++                               const char* interface_key,
++                               const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<unsigned>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++}  // namespace
++
++uint32_t Notification::maxActionsForBinding(ScriptState* script_state) {
++  return MaybeUnsignedOverride(script_state, maxActions(), "notification",
++                               "maxActionsOverride");
++}
++
+ DispatchEventResult Notification::DispatchEventInternal(Event& event) {
+   DCHECK(GetExecutionContext()->IsContextThread());
+   return EventTarget::DispatchEventInternal(event);
+diff --git a/third_party/blink/renderer/modules/notifications/notification.h b/third_party/blink/renderer/modules/notifications/notification.h
+index d8a3a40a2420a23f3baf451e9a9d4f797a067f84..4318142ac84e6e5b043112f5bddb9e66bb342d7b 100644
+--- a/third_party/blink/renderer/modules/notifications/notification.h
++++ b/third_party/blink/renderer/modules/notifications/notification.h
+@@ -128,6 +128,7 @@ class MODULES_EXPORT Notification final
+       V8NotificationPermissionCallback* deprecated_callback = nullptr);
+ 
+   static uint32_t maxActions();
++  static uint32_t maxActionsForBinding(ScriptState*);
+ 
+   // EventTarget interface.
+   ExecutionContext* GetExecutionContext() const final {
+diff --git a/third_party/blink/renderer/modules/notifications/notification.idl b/third_party/blink/renderer/modules/notifications/notification.idl
+index 9637561916583f6aa07f8f0784291de3dd2ae094..bd125bb52798afb341cdf8f8d60a84d752781b8f 100644
+--- a/third_party/blink/renderer/modules/notifications/notification.idl
++++ b/third_party/blink/renderer/modules/notifications/notification.idl
+@@ -50,7 +50,7 @@ enum NotificationPermission {
+     // TODO(crbug.com/841185): |deprecatedCallback| is not nullable in the spec.
+     [CallWith=ScriptState, Exposed=Window, MeasureAs=NotificationPermissionRequested] static Promise<NotificationPermission> requestPermission(optional NotificationPermissionCallback? deprecatedCallback);
+ 
+-    static readonly attribute unsigned long maxActions;
++    [CallWith=ScriptState, ImplementedAs=maxActionsForBinding] static readonly attribute unsigned long maxActions;
+ 
+     attribute EventHandler onclick;
+     [MeasureAs=NotificationShowEvent] attribute EventHandler onshow;

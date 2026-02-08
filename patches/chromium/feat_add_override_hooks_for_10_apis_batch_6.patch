@@ -1,0 +1,540 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 08:08:42 +0530
+Subject: feat: add override hooks for 10 APIs (Batch 6)
+
+Screen: availWidth, availHeight, colorDepth, pixelDepth
+Window: outerWidth, outerHeight, devicePixelRatio
+Navigator: hardwareConcurrency, deviceMemory, maxTouchPoints
+
+diff --git a/third_party/blink/renderer/core/events/navigator_events.cc b/third_party/blink/renderer/core/events/navigator_events.cc
+index a57561775c1197c98d93aaddd96a47674b7ad953..302558bb851cb3feb6d64219812e8b91850b8c47 100644
+--- a/third_party/blink/renderer/core/events/navigator_events.cc
++++ b/third_party/blink/renderer/core/events/navigator_events.cc
+@@ -30,10 +30,12 @@
+ 
+ #include "third_party/blink/renderer/core/events/navigator_events.h"
+ 
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+ #include "third_party/blink/renderer/core/frame/settings.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -42,4 +44,44 @@ int32_t NavigatorEvents::maxTouchPoints(Navigator& navigator) {
+   return window ? window->GetFrame()->GetSettings()->GetMaxTouchPoints() : 0;
+ }
+ 
++namespace {
++int32_t MaybeIntOverride(ScriptState* script_state,
++                         int32_t value,
++                         const char* interface_key,
++                         const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<int32_t>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++}  // namespace
++
++int32_t NavigatorEvents::maxTouchPointsForBinding(ScriptState* script_state,
++                                                  Navigator& navigator) {
++  return MaybeIntOverride(script_state, maxTouchPoints(navigator), "navigator",
++                          "maxTouchPointsOverride");
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/events/navigator_events.h b/third_party/blink/renderer/core/events/navigator_events.h
+index a78ff2589aa3045e2ed504382856525dd3bfea63..9225456f624b35f077fffdcc86850858d1cd4a56 100644
+--- a/third_party/blink/renderer/core/events/navigator_events.h
++++ b/third_party/blink/renderer/core/events/navigator_events.h
+@@ -37,12 +37,14 @@
+ namespace blink {
+ 
+ class Navigator;
++class ScriptState;
+ 
+ class CORE_EXPORT NavigatorEvents {
+   STATIC_ONLY(NavigatorEvents);
+ 
+  public:
+   static int32_t maxTouchPoints(Navigator&);
++  static int32_t maxTouchPointsForBinding(ScriptState*, Navigator&);
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/events/navigator_events.idl b/third_party/blink/renderer/core/events/navigator_events.idl
+index ff9ea1abb6ca2787a49393ab01693d542cf96b08..0475e5ce7d97a09dd667da7b5987606e92a8b2b2 100644
+--- a/third_party/blink/renderer/core/events/navigator_events.idl
++++ b/third_party/blink/renderer/core/events/navigator_events.idl
+@@ -33,5 +33,5 @@
+ [
+     ImplementedAs=NavigatorEvents
+ ] partial interface Navigator {
+-    [MeasureAs=NavigatorMaxTouchPoints] readonly attribute long maxTouchPoints;
++    [MeasureAs=NavigatorMaxTouchPoints, CallWith=ScriptState, ImplementedAs=maxTouchPointsForBinding] readonly attribute long maxTouchPoints;
+ };
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index c2c5909c11eb46e374c190f8d4fc43285f9ed150..428b6d4638ea9ad52238ed86bd0fae24bd71751a 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -59,6 +59,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/script_promise.h"
+ #include "third_party/blink/renderer/bindings/core/v8/script_value.h"
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_scroll_to_options.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_void_function.h"
+ #include "third_party/blink/renderer/bindings/core/v8/window_proxy.h"
+@@ -158,6 +159,7 @@
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/source_location.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/blob/blob_url.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+@@ -1653,6 +1655,87 @@ int LocalDOMWindow::outerWidth() const {
+   return chrome_client.RootWindowRect(*frame).width();
+ }
+ 
++namespace {
++int MaybeIntOverride(ScriptState* script_state,
++                     int value,
++                     const char* interface_key,
++                     const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<int>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++
++double MaybeDoubleOverride(ScriptState* script_state,
++                           double value,
++                           const char* interface_key,
++                           const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {v8::Number::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return override_result.As<v8::Number>()->Value();
++  return value;
++}
++}  // namespace
++
++int LocalDOMWindow::outerHeightForBinding(ScriptState* script_state) const {
++  return MaybeIntOverride(script_state, outerHeight(), "window",
++                          "outerHeightOverride");
++}
++
++int LocalDOMWindow::outerWidthForBinding(ScriptState* script_state) const {
++  return MaybeIntOverride(script_state, outerWidth(), "window",
++                          "outerWidthOverride");
++}
++
++double LocalDOMWindow::devicePixelRatioForBinding(
++    ScriptState* script_state) const {
++  return MaybeDoubleOverride(script_state, devicePixelRatio(), "window",
++                             "devicePixelRatioOverride");
++}
++
+ gfx::Size LocalDOMWindow::GetViewportSize() const {
+   LocalFrameView* view = GetFrame()->View();
+   if (!view)
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.h b/third_party/blink/renderer/core/frame/local_dom_window.h
+index 3a5327ba9f07ee0d827e4f488d6386109e0b591c..a86d10c67c0936ea22fb139c2fd0d214f5ec48ab 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.h
++++ b/third_party/blink/renderer/core/frame/local_dom_window.h
+@@ -328,6 +328,8 @@ class CORE_EXPORT LocalDOMWindow final : public DOMWindow,
+ 
+   int outerHeight() const;
+   int outerWidth() const;
++  int outerHeightForBinding(ScriptState*) const;
++  int outerWidthForBinding(ScriptState*) const;
+   int innerHeight() const;
+   int innerWidth() const;
+   int screenX() const;
+@@ -359,6 +361,7 @@ class CORE_EXPORT LocalDOMWindow final : public DOMWindow,
+ 
+   // WebKit extensions
+   double devicePixelRatio() const;
++  double devicePixelRatioForBinding(ScriptState*) const;
+ 
+   // This is the interface orientation in degrees. Some examples are:
+   //  0 is straight up; -90 is when the device is rotated 90 clockwise;
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index f5c0db2d1b58de1fb54aa6545de8ac0fb177319e..2b9e9844b15d4879a7ac26d1810dbfca95972f75 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -5,6 +5,9 @@
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
+ #include "base/system/sys_info.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -12,4 +15,44 @@ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
++namespace {
++unsigned MaybeUnsignedOverride(ScriptState* script_state,
++                               unsigned value,
++                               const char* interface_key,
++                               const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<unsigned>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++}  // namespace
++
++unsigned NavigatorConcurrentHardware::hardwareConcurrencyForBinding(
++    ScriptState* script_state) const {
++  return MaybeUnsignedOverride(script_state, hardwareConcurrency(), "navigator",
++                               "hardwareConcurrencyOverride");
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h
+index 305eea53fc02290af419c243b26d83a1adbc144c..7325c2a220774b101383135010f418fe8e556535 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h
+@@ -9,9 +9,12 @@
+ 
+ namespace blink {
+ 
++class ScriptState;
++
+ class CORE_EXPORT NavigatorConcurrentHardware {
+  public:
+   virtual unsigned hardwareConcurrency() const;
++  unsigned hardwareConcurrencyForBinding(ScriptState*) const;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.idl b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.idl
+index d675cc366188390404e0d5727f62daa041356901..0c02079c51764ffb3c3c0359066bd896adc4559f 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.idl
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.idl
+@@ -5,5 +5,5 @@
+ // https://html.spec.whatwg.org/C/#navigator.hardwareconcurrency
+ 
+ interface mixin NavigatorConcurrentHardware {
+-    [MeasureAs=NavigatorHardwareConcurrency] readonly attribute unsigned long long hardwareConcurrency;
++    [MeasureAs=NavigatorHardwareConcurrency, CallWith=ScriptState, ImplementedAs=hardwareConcurrencyForBinding] readonly attribute unsigned long long hardwareConcurrency;
+ };
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 05fa33e4568e8eea926a0d97c1d83a4000fa6b3f..59b4849f4834d924d045f153eb06ee518e9db1a6 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -6,8 +6,10 @@
+ 
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+ #include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -15,4 +17,44 @@ float NavigatorDeviceMemory::deviceMemory() const {
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
++namespace {
++float MaybeFloatOverride(ScriptState* script_state,
++                         float value,
++                         const char* interface_key,
++                         const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<float>(override_result.As<v8::Number>()->Value());
++  return value;
++}
++}  // namespace
++
++float NavigatorDeviceMemory::deviceMemoryForBinding(
++    ScriptState* script_state) const {
++  return MaybeFloatOverride(script_state, deviceMemory(), "navigator",
++                            "deviceMemoryOverride");
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.h b/third_party/blink/renderer/core/frame/navigator_device_memory.h
+index 33fe17542a9c18d2a6e2c9abb4e22887caf742c4..38b1f92757870f018e812364befd8807ddef249f 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.h
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.h
+@@ -9,9 +9,12 @@
+ 
+ namespace blink {
+ 
++class ScriptState;
++
+ class CORE_EXPORT NavigatorDeviceMemory {
+  public:
+   float deviceMemory() const;
++  float deviceMemoryForBinding(ScriptState*) const;
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.idl b/third_party/blink/renderer/core/frame/navigator_device_memory.idl
+index 6a57f5507df3c953a095465459388f4cc3609a61..5f059626200dd0dda8d799afc6da56bd465e2c42 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.idl
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.idl
+@@ -5,6 +5,6 @@
+ // https://github.com/w3c/device-memory#the-web-exposed-api
+ 
+ interface mixin NavigatorDeviceMemory {
+-    [MeasureAs=NavigatorDeviceMemory,SecureContext]
++    [MeasureAs=NavigatorDeviceMemory, SecureContext, CallWith=ScriptState, ImplementedAs=deviceMemoryForBinding]
+     readonly attribute float deviceMemory;
+ };
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index 90516630f4cb0e758f1e0efce222373fb260189d..a2f4ada9733c0bd53cf65b7af1e683956394cd17 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -124,6 +124,37 @@ int MaybeIntOverride(ScriptState* script_state,
+     return static_cast<int>(override_result.As<v8::Number>()->Value());
+   return value;
+ }
++unsigned MaybeUnsignedOverride(ScriptState* script_state,
++                               unsigned value,
++                               const char* interface_key,
++                               const char* override_name) {
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, interface_key, override_name);
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      v8::Number::New(isolate, static_cast<double>(value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!V8ScriptRunner::CallFunction(
++           override_fn, ExecutionContext::From(script_state),
++           context->Global(), 1, argv, isolate)
++           .ToLocal(&override_result))
++    return value;
++
++  if (override_result->IsNumber())
++    return static_cast<unsigned>(override_result.As<v8::Number>()->Value());
++  return value;
++}
+ }  // namespace
+ 
+ int Screen::heightForBinding(ScriptState* script_state) const {
+@@ -153,6 +184,16 @@ unsigned Screen::pixelDepth() const {
+   return colorDepth();
+ }
+ 
++unsigned Screen::colorDepthForBinding(ScriptState* script_state) const {
++  return MaybeUnsignedOverride(script_state, colorDepth(), "screen",
++                               "colorDepthOverride");
++}
++
++unsigned Screen::pixelDepthForBinding(ScriptState* script_state) const {
++  return MaybeUnsignedOverride(script_state, pixelDepth(), "screen",
++                               "pixelDepthOverride");
++}
++
+ int Screen::availLeft() const {
+   if (!DomWindow())
+     return 0;
+@@ -177,6 +218,16 @@ int Screen::availWidth() const {
+   return GetRect(/*available=*/true).width();
+ }
+ 
++int Screen::availHeightForBinding(ScriptState* script_state) const {
++  return MaybeIntOverride(script_state, availHeight(), "screen",
++                          "availHeightOverride");
++}
++
++int Screen::availWidthForBinding(ScriptState* script_state) const {
++  return MaybeIntOverride(script_state, availWidth(), "screen",
++                          "availWidthOverride");
++}
++
+ void Screen::Trace(Visitor* visitor) const {
+   EventTarget::Trace(visitor);
+   ExecutionContextClient::Trace(visitor);
+diff --git a/third_party/blink/renderer/core/frame/screen.h b/third_party/blink/renderer/core/frame/screen.h
+index a29b20172c019967de95eaf3a20af7d922bcf4c4..c21623ce0469a7b2f8084d7824b3d659312d7dcd 100644
+--- a/third_party/blink/renderer/core/frame/screen.h
++++ b/third_party/blink/renderer/core/frame/screen.h
+@@ -63,10 +63,14 @@ class CORE_EXPORT Screen : public EventTarget, public ExecutionContextClient {
+   int widthForBinding(ScriptState*) const;
+   unsigned colorDepth() const;
+   unsigned pixelDepth() const;
++  unsigned colorDepthForBinding(ScriptState*) const;
++  unsigned pixelDepthForBinding(ScriptState*) const;
+   int availLeft() const;
+   int availTop() const;
+   int availHeight() const;
+   int availWidth() const;
++  int availHeightForBinding(ScriptState*) const;
++  int availWidthForBinding(ScriptState*) const;
+ 
+   void Trace(Visitor*) const override;
+ 
+diff --git a/third_party/blink/renderer/core/frame/screen.idl b/third_party/blink/renderer/core/frame/screen.idl
+index 3b269e9ac4748d28e76e8fa80d188b640f7134ff..e42592afb8703c3e0fe468360c49b57d24c0c01c 100644
+--- a/third_party/blink/renderer/core/frame/screen.idl
++++ b/third_party/blink/renderer/core/frame/screen.idl
+@@ -31,13 +31,13 @@
+ [
+     Exposed=Window
+ ] interface Screen : EventTarget {
+-    [Measure] readonly attribute long availWidth;
+-    [Measure] readonly attribute long availHeight;
++    [Measure, CallWith=ScriptState, ImplementedAs=availWidthForBinding] readonly attribute long availWidth;
++    [Measure, CallWith=ScriptState, ImplementedAs=availHeightForBinding] readonly attribute long availHeight;
+     [Measure, CallWith=ScriptState, ImplementedAs=widthForBinding] readonly attribute long width;
+     [Measure, CallWith=ScriptState, ImplementedAs=heightForBinding] readonly attribute long height;
+-    [Measure] readonly attribute unsigned long colorDepth;
++    [Measure, CallWith=ScriptState, ImplementedAs=colorDepthForBinding] readonly attribute unsigned long colorDepth;
+     // pixelDepth() is an alias for colorDepth(), no need to instrument it twice.
+-    [Measure] readonly attribute unsigned long pixelDepth;
++    [Measure, CallWith=ScriptState, ImplementedAs=pixelDepthForBinding] readonly attribute unsigned long pixelDepth;
+ 
+     // Non-standard
+     [Measure] readonly attribute long availLeft;
+diff --git a/third_party/blink/renderer/core/frame/window.idl b/third_party/blink/renderer/core/frame/window.idl
+index dd50e40e7ece3457652a4334498b9661634021ee..da96511e9f084691c3a04c04a589c8e9fe291590 100644
+--- a/third_party/blink/renderer/core/frame/window.idl
++++ b/third_party/blink/renderer/core/frame/window.idl
+@@ -153,9 +153,9 @@
+     // client
+     [MeasureAs=WindowScreenX, Replaceable] readonly attribute long screenX;
+     [MeasureAs=WindowScreenY, Replaceable] readonly attribute long screenY;
+-    [MeasureAs=WindowOuterWidth, Replaceable] readonly attribute long outerWidth;
+-    [MeasureAs=WindowOuterHeight, Replaceable] readonly attribute long outerHeight;
+-    [MeasureAs=WindowDevicePixelRatio, Replaceable] readonly attribute double devicePixelRatio;
++    [MeasureAs=WindowOuterWidth, Replaceable, CallWith=ScriptState, ImplementedAs=outerWidthForBinding] readonly attribute long outerWidth;
++    [MeasureAs=WindowOuterHeight, Replaceable, CallWith=ScriptState, ImplementedAs=outerHeightForBinding] readonly attribute long outerHeight;
++    [MeasureAs=WindowDevicePixelRatio, Replaceable, CallWith=ScriptState, ImplementedAs=devicePixelRatioForBinding] readonly attribute double devicePixelRatio;
+ 
+     // Selection API
+     // https://w3c.github.io/selection-api/#extensions-to-window-interface

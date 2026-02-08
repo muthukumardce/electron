@@ -1,0 +1,1274 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 19:51:34 +0530
+Subject: feat: add override hooks for 23 APIs (Batch 13)
+
+Navigator.userAgent (ForBinding refactor), Geolocation (getCurrentPosition,
+watchPosition, clearWatch), HTMLCanvasElement.toBlob, HTMLCanvasElement.getContext,
+OffscreenCanvas.getContext, HTMLFormElement/HTMLInputElement/HTMLSelectElement
+autocomplete, CacheStorage (open, has, delete, keys), FontAccess.queryLocalFonts,
+ScreenOrientation (lock, unlock), ServiceWorkerContainer (register,
+getRegistration, getRegistrations), Navigator.vibrate,
+BaseAudioContext.createAnalyser (ForBinding refactor),
+OfflineAudioContext.startRendering
+
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.cc b/third_party/blink/renderer/core/frame/navigator_id.cc
+index c2be1e82365f1348ad8a7efde74d7a57e9b9fce9..d72f0e5e5f559e3e73a9ae2fb35eab3eb4f66d4b 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.cc
++++ b/third_party/blink/renderer/core/frame/navigator_id.cc
+@@ -133,6 +133,11 @@ String NavigatorID::platformForBinding(ScriptState* script_state) const {
+                              "platformOverride");
+ }
+ 
++String NavigatorID::userAgentForBinding(ScriptState* script_state) {
++  return MaybeStringOverride(script_state, userAgent(script_state), "navigator",
++                             "userAgentOverride");
++}
++
+ String NavigatorID::product() {
+   return "Gecko";
+ }
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.h b/third_party/blink/renderer/core/frame/navigator_id.h
+index 050b6f96b48d4526905b762bc69bd69af9247ae6..1e000b2e82176dd0a38b1921a46d38ae8a749593 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.h
++++ b/third_party/blink/renderer/core/frame/navigator_id.h
+@@ -48,6 +48,7 @@ class CORE_EXPORT NavigatorID {
+   String platformForBinding(ScriptState*) const;
+   String product();
+   virtual String userAgent(ScriptState* script_state) const = 0;
++  String userAgentForBinding(ScriptState*);
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.idl b/third_party/blink/renderer/core/frame/navigator_id.idl
+index 811340ca0462bbfdc20371d99199a26cbb2a346d..2365b48fb67738c437046137864c7828da9eab24 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.idl
++++ b/third_party/blink/renderer/core/frame/navigator_id.idl
+@@ -38,5 +38,5 @@ interface mixin NavigatorID {
+     readonly attribute DOMString product; // constant "Gecko"
+     // https://www.w3.org/Bugs/Public/show_bug.cgi?id=22555
+     // boolean taintEnabled(); // constant false
+-    [MeasureAs=NavigatorUserAgent, CallWith=ScriptState] readonly attribute DOMString userAgent;
++    [MeasureAs=NavigatorUserAgent, CallWith=ScriptState, ImplementedAs=userAgentForBinding] readonly attribute DOMString userAgent;
+ };
+diff --git a/third_party/blink/renderer/core/geolocation/geolocation.cc b/third_party/blink/renderer/core/geolocation/geolocation.cc
+index 5ba0744d960b4bca56273dadbf15b2341ffe0b50..1c09409d545ce50e5f5d6ca1d8a97ebc8692cd0b 100644
+--- a/third_party/blink/renderer/core/geolocation/geolocation.cc
++++ b/third_party/blink/renderer/core/geolocation/geolocation.cc
+@@ -49,6 +49,7 @@
+ #include "third_party/blink/renderer/core/page/page.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/timing/epoch_time_stamp.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/source_location.h"
+ #include "third_party/blink/renderer/platform/runtime_enabled_features.h"
+ 
+@@ -703,4 +704,70 @@ void Geolocation::UpdateAccuracyHint() {
+   }
+ }
+ 
++void Geolocation::getCurrentPositionForBinding(
++    ScriptState* script_state,
++    V8PositionCallback* success_callback,
++    V8PositionErrorCallback* error_callback,
++    const PositionOptions* options) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "geolocation", "getCurrentPositionOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  getCurrentPositionForBindings(success_callback, error_callback, options);
++}
++
++int32_t Geolocation::watchPositionForBinding(
++    ScriptState* script_state,
++    V8PositionCallback* success_callback,
++    V8PositionErrorCallback* error_callback,
++    const PositionOptions* options) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "geolocation", "watchPositionOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return watchPositionForBindings(success_callback, error_callback, options);
++}
++
++void Geolocation::clearWatchForBinding(ScriptState* script_state,
++                                       int32_t watch_id) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "geolocation", "clearWatchOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  clearWatch(watch_id);
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/geolocation/geolocation.h b/third_party/blink/renderer/core/geolocation/geolocation.h
+index 7d7aea51f516963f2fc110d4f61f77c73d998997..70f4673ed2f278826e38b18e66f7a1265e0fd237 100644
+--- a/third_party/blink/renderer/core/geolocation/geolocation.h
++++ b/third_party/blink/renderer/core/geolocation/geolocation.h
+@@ -56,6 +56,7 @@ enum class PermissionStatus;
+ 
+ class LocalFrame;
+ class Navigator;
++class ScriptState;
+ 
+ class CORE_EXPORT Geolocation final : public ScriptWrappable,
+                                       public ActiveScriptWrappable<Geolocation>,
+@@ -76,6 +77,19 @@ class CORE_EXPORT Geolocation final : public ScriptWrappable,
+ 
+   LocalFrame* GetFrame() const;
+ 
++  // ForBinding wrappers that notify custom overrides before delegating.
++  void getCurrentPositionForBinding(
++      ScriptState*,
++      V8PositionCallback*,
++      V8PositionErrorCallback* = nullptr,
++      const PositionOptions* = PositionOptions::Create());
++  int32_t watchPositionForBinding(
++      ScriptState*,
++      V8PositionCallback*,
++      V8PositionErrorCallback* = nullptr,
++      const PositionOptions* = PositionOptions::Create());
++  void clearWatchForBinding(ScriptState*, int32_t watch_id);
++
+   // Creates a oneshot and attempts to obtain a position that meets the
+   // constraints of the options. This method gets called when the geolocation
+   // API is invoked from script.
+diff --git a/third_party/blink/renderer/core/geolocation/geolocation.idl b/third_party/blink/renderer/core/geolocation/geolocation.idl
+index 6d75074b9817ac0d8310250b75270db8634384ae..c40c6a13bc6f61f47dd3c99910bc82eae8eeb677 100644
+--- a/third_party/blink/renderer/core/geolocation/geolocation.idl
++++ b/third_party/blink/renderer/core/geolocation/geolocation.idl
+@@ -31,7 +31,8 @@
+     [
+         LogActivity,
+         MeasureAs=GeolocationGetCurrentPosition,
+-        ImplementedAs=getCurrentPositionForBindings
++        CallWith=ScriptState,
++        ImplementedAs=getCurrentPositionForBinding
+     ] void getCurrentPosition(
+         PositionCallback successCallback,
+         optional PositionErrorCallback? errorCallback = null,
+@@ -40,13 +41,14 @@
+     [
+         LogActivity,
+         MeasureAs=GeolocationWatchPosition,
+-        ImplementedAs=watchPositionForBindings
++        CallWith=ScriptState,
++        ImplementedAs=watchPositionForBinding
+     ] long watchPosition(
+         PositionCallback successCallback,
+         optional PositionErrorCallback? errorCallback = null,
+         optional PositionOptions options = {});
+ 
+-    void clearWatch(long watchID);
++    [CallWith=ScriptState, ImplementedAs=clearWatchForBinding] void clearWatch(long watchID);
+ };
+ 
+ // https://www.w3.org/TR/geolocation-API/#position-callback
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+index 243479622a574ea431bf6e9f418a4ca5697a4e84..b29817a0f7cb41cdd84d108d8143eced530b7cb5 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.cc
+@@ -1489,6 +1489,26 @@ void HTMLCanvasElement::toBlob(V8BlobCallback* callback,
+   }
+ }
+ 
++void HTMLCanvasElement::toBlobForBinding(
++    ScriptState* script_state,
++    V8BlobCallback* callback,
++    const String& mime_type,
++    const ScriptValue& quality_argument,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "htmlCanvasElement", "toBlobOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Isolate* isolate = script_state->GetIsolate();
++      v8::Local<v8::Value> args[] = {V8String(isolate, mime_type)};
++      override_fn
++          ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++          .ToLocalChecked();
++    }
++  }
++  toBlob(callback, mime_type, quality_argument, exception_state);
++}
++
+ bool HTMLCanvasElement::IsPresentationAttribute(
+     const QualifiedName& name) const {
+   if (name == html_names::kWidthAttr || name == html_names::kHeightAttr)
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.h b/third_party/blink/renderer/core/html/canvas/html_canvas_element.h
+index ff46dfc0475b4ad1a37ef7f3d0cef93326c1b0dd..e4f05f185877ef1055483611ff27eb8b263c5aa0 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.h
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.h
+@@ -149,6 +149,18 @@ class CORE_EXPORT HTMLCanvasElement final
+               ExceptionState& exception_state) {
+     return toBlob(callback, mime_type, ScriptValue(), exception_state);
+   }
++  void toBlobForBinding(ScriptState*,
++                        V8BlobCallback*,
++                        const String& mime_type,
++                        const ScriptValue& quality_argument,
++                        ExceptionState&);
++  void toBlobForBinding(ScriptState* script_state,
++                        V8BlobCallback* callback,
++                        const String& mime_type,
++                        ExceptionState& exception_state) {
++    return toBlobForBinding(script_state, callback, mime_type, ScriptValue(),
++                            exception_state);
++  }
+   void configureHighDynamicRange(const CanvasHighDynamicRangeOptions*,
+                                  ExceptionState&);
+ 
+diff --git a/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl b/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl
+index 249cb01f7bd2971290ca62355326b0f38c7481be..0a8498f70fe69bc9a23212528279335e3134e185 100644
+--- a/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl
++++ b/third_party/blink/renderer/core/html/canvas/html_canvas_element.idl
+@@ -41,7 +41,7 @@
+ 
+     [MeasureAs=CanvasToDataURL, RaisesException, CallWith=ScriptState, ImplementedAs=toDataURLForBinding] DOMString toDataURL(optional DOMString type = "image/png", optional any quality);
+ 
+-    [MeasureAs=CanvasToBlob, RaisesException] void toBlob(BlobCallback _callback, optional DOMString type = "image/png", optional any quality);
++    [MeasureAs=CanvasToBlob, RaisesException, CallWith=ScriptState, ImplementedAs=toBlobForBinding] void toBlob(BlobCallback _callback, optional DOMString type = "image/png", optional any quality);
+ 
+     [RuntimeEnabled=CanvasHDR, RaisesException] void configureHighDynamicRange(CanvasHighDynamicRangeOptions options);
+ };
+diff --git a/third_party/blink/renderer/core/html/forms/html_form_element.cc b/third_party/blink/renderer/core/html/forms/html_form_element.cc
+index 68c11f82de10b894d3f4978c9d693a328a2d51ae..3d55c89d53b358877996e057cb7bdc3bbc7f9941 100644
+--- a/third_party/blink/renderer/core/html/forms/html_form_element.cc
++++ b/third_party/blink/renderer/core/html/forms/html_form_element.cc
+@@ -70,6 +70,7 @@
+ #include "third_party/blink/renderer/core/loader/mixed_content_checker.h"
+ #include "third_party/blink/renderer/core/page/chrome_client.h"
+ #include "third_party/blink/renderer/core/page/page.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+@@ -1112,6 +1113,41 @@ bool HTMLFormElement::ShouldAutocomplete() const {
+       FastGetAttribute(html_names::kAutocompleteAttr), "off");
+ }
+ 
++String HTMLFormElement::autocompleteForBinding(ScriptState* script_state) const {
++  AtomicString value = FastGetAttribute(html_names::kAutocompleteAttr);
++  // ReflectOnly=("on","off"), ReflectMissing="on", ReflectInvalid="on"
++  String result;
++  if (EqualIgnoringASCIICase(value, "off")) {
++    result = "off";
++  } else {
++    result = "on";
++  }
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "htmlFormElement", "autocompleteOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> args[] = {V8String(isolate, result)};
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++              .ToLocal(&override_result)) {
++        if (override_result->IsString()) {
++          return ToCoreString(isolate, override_result.As<v8::String>());
++        }
++      }
++    }
++  }
++  return result;
++}
++
++void HTMLFormElement::setAutocompleteForBinding(ScriptState*,
++                                                const String& value) {
++  setAttribute(html_names::kAutocompleteAttr, AtomicString(value));
++}
++
+ DOMTokenList& HTMLFormElement::relList() const {
+   return static_cast<DOMTokenList&>(*rel_list_);
+ }
+diff --git a/third_party/blink/renderer/core/html/forms/html_form_element.h b/third_party/blink/renderer/core/html/forms/html_form_element.h
+index 3856bed2fb266f2a50961854f482a5e2d7e6e5b0..b6b54dd8bbba80b426660c35adc5dc36f2d13693 100644
+--- a/third_party/blink/renderer/core/html/forms/html_form_element.h
++++ b/third_party/blink/renderer/core/html/forms/html_form_element.h
+@@ -37,6 +37,7 @@ namespace blink {
+ class DOMTokenList;
+ class Event;
+ class HTMLFormControlElement;
++class ScriptState;
+ class HTMLFormControlsCollection;
+ class HTMLImageElement;
+ class ListedElement;
+@@ -80,6 +81,10 @@ class CORE_EXPORT HTMLFormElement final : public HTMLElement {
+ 
+   bool ShouldAutocomplete() const;
+ 
++  // ForBinding wrappers for override hooks
++  String autocompleteForBinding(ScriptState*) const;
++  void setAutocompleteForBinding(ScriptState*, const String&);
++
+   void Associate(ListedElement&);
+   void Disassociate(ListedElement&);
+   void Associate(HTMLImageElement&);
+diff --git a/third_party/blink/renderer/core/html/forms/html_form_element.idl b/third_party/blink/renderer/core/html/forms/html_form_element.idl
+index cbc2e823c09a53f9aa4dafbcb40aa1200836e606..843e88618fbf287479b4ed0f223ee36117e21e68 100644
+--- a/third_party/blink/renderer/core/html/forms/html_form_element.idl
++++ b/third_party/blink/renderer/core/html/forms/html_form_element.idl
+@@ -27,7 +27,7 @@
+     [HTMLConstructor] constructor();
+     [CEReactions, Reflect=accept_charset] attribute DOMString acceptCharset;
+     [CEReactions, URL] attribute USVString action;
+-    [CEReactions, Reflect, ReflectOnly=("on","off"), ReflectMissing="on", ReflectInvalid="on"] attribute DOMString autocomplete;
++    [CEReactions, CallWith=ScriptState, ImplementedAs=autocompleteForBinding] attribute DOMString autocomplete;
+     [CEReactions] attribute DOMString enctype;
+     [CEReactions] attribute DOMString encoding;
+     [CEReactions] attribute DOMString method;
+diff --git a/third_party/blink/renderer/core/html/forms/html_input_element.cc b/third_party/blink/renderer/core/html/forms/html_input_element.cc
+index 9f1ba2e216a49637397ead4c629290d3ae7b41d8..7ce1623ca9e572b57d7797aa3d7d7e8548919a17 100644
+--- a/third_party/blink/renderer/core/html/forms/html_input_element.cc
++++ b/third_party/blink/renderer/core/html/forms/html_input_element.cc
+@@ -89,6 +89,7 @@
+ #include "third_party/blink/renderer/core/page/focus_controller.h"
+ #include "third_party/blink/renderer/core/page/page.h"
+ #include "third_party/blink/renderer/core/scroll/scroll_into_view_util.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+@@ -194,6 +195,35 @@ bool HTMLInputElement::ShouldAutocomplete() const {
+   return TextControlElement::ShouldAutocomplete();
+ }
+ 
++String HTMLInputElement::autocompleteForBinding(
++    ScriptState* script_state) const {
++  String result = IDLExposedAutofillValue();
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "htmlInputElement", "autocompleteOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> args[] = {V8String(isolate, result)};
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++              .ToLocal(&override_result)) {
++        if (override_result->IsString()) {
++          return ToCoreString(isolate, override_result.As<v8::String>());
++        }
++      }
++    }
++  }
++  return result;
++}
++
++void HTMLInputElement::setAutocompleteForBinding(ScriptState*,
++                                                  const String& value) {
++  setIDLExposedAutofillValue(value);
++}
++
+ bool HTMLInputElement::IsValidValue(const String& value) const {
+   if (!input_type_->IsValidValue(value)) {
+     return false;
+diff --git a/third_party/blink/renderer/core/html/forms/html_input_element.h b/third_party/blink/renderer/core/html/forms/html_input_element.h
+index 66a003649b08f144b4ceb7ea63dbeabb291176d5..782fde68f6c825c4648b8d8015ba3efdb21a2b48 100644
+--- a/third_party/blink/renderer/core/html/forms/html_input_element.h
++++ b/third_party/blink/renderer/core/html/forms/html_input_element.h
+@@ -52,6 +52,7 @@ class KURL;
+ class ListAttributeTargetObserver;
+ class RadioButtonGroupScope;
+ class ScriptObject;
++class ScriptState;
+ struct DateTimeChooserParameters;
+ 
+ class CORE_EXPORT HTMLInputElement
+@@ -71,6 +72,10 @@ class CORE_EXPORT HTMLInputElement
+ 
+   bool ShouldAutocomplete() const final;
+ 
++  // ForBinding wrappers for override hooks
++  String autocompleteForBinding(ScriptState*) const;
++  void setAutocompleteForBinding(ScriptState*, const String&);
++
+   // For ValidityState
+   bool HasBadInput() const final;
+   bool PatternMismatch() const final;
+diff --git a/third_party/blink/renderer/core/html/forms/html_input_element.idl b/third_party/blink/renderer/core/html/forms/html_input_element.idl
+index 40e9141fd64ebd80ed2da3871bef94634bdddd60..9f64e55ced1f1687565f90746f32066208bb5ca2 100644
+--- a/third_party/blink/renderer/core/html/forms/html_input_element.idl
++++ b/third_party/blink/renderer/core/html/forms/html_input_element.idl
+@@ -30,7 +30,7 @@ enum SelectionMode { "select", "start", "end", "preserve" };
+     [HTMLConstructor] constructor();
+     [CEReactions, Reflect] attribute DOMString accept;
+     [CEReactions, Reflect] attribute DOMString alt;
+-    [CEReactions, ImplementedAs=IDLExposedAutofillValue] attribute DOMString autocomplete;
++    [CEReactions, CallWith=ScriptState, ImplementedAs=autocompleteForBinding] attribute DOMString autocomplete;
+     [CEReactions, Reflect=checked] attribute boolean defaultChecked;
+     [ImplementedAs=checkedForBinding] attribute boolean checked;
+     [CEReactions, Reflect] attribute DOMString dirName;
+diff --git a/third_party/blink/renderer/core/html/forms/html_select_element.cc b/third_party/blink/renderer/core/html/forms/html_select_element.cc
+index 770afcb9085d61199facdf770843881a25c86aba..e96f4c282cf70934ba476daf5ca9a4b4072ea94e 100644
+--- a/third_party/blink/renderer/core/html/forms/html_select_element.cc
++++ b/third_party/blink/renderer/core/html/forms/html_select_element.cc
+@@ -73,6 +73,7 @@
+ #include "third_party/blink/renderer/core/page/chrome_client.h"
+ #include "third_party/blink/renderer/core/page/page.h"
+ #include "third_party/blink/renderer/core/page/spatial_navigation.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+@@ -317,6 +318,35 @@ void HTMLSelectElement::setValueForBinding(const String& value) {
+   }
+ }
+ 
++String HTMLSelectElement::autocompleteForBinding(
++    ScriptState* script_state) const {
++  String result = IDLExposedAutofillValue();
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "htmlSelectElement", "autocompleteOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> args[] = {V8String(isolate, result)};
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++              .ToLocal(&override_result)) {
++        if (override_result->IsString()) {
++          return ToCoreString(isolate, override_result.As<v8::String>());
++        }
++      }
++    }
++  }
++  return result;
++}
++
++void HTMLSelectElement::setAutocompleteForBinding(ScriptState*,
++                                                   const String& value) {
++  setIDLExposedAutofillValue(value);
++}
++
+ void HTMLSelectElement::SetValue(const String& value,
+                                  bool send_events,
+                                  WebAutofillState autofill_state) {
+diff --git a/third_party/blink/renderer/core/html/forms/html_select_element.h b/third_party/blink/renderer/core/html/forms/html_select_element.h
+index 253db7d57c7842cfb9b0921cc5397a825dfa42fb..e6361539a8461ac448e0a1986d2cb25d144e5d57 100644
+--- a/third_party/blink/renderer/core/html/forms/html_select_element.h
++++ b/third_party/blink/renderer/core/html/forms/html_select_element.h
+@@ -45,6 +45,7 @@ namespace blink {
+ class AXObject;
+ class AutoscrollController;
+ class ExceptionState;
++class ScriptState;
+ class HTMLHRElement;
+ class HTMLOptGroupElement;
+ class HTMLOptionElement;
+@@ -124,6 +125,10 @@ class CORE_EXPORT HTMLSelectElement final
+   String valueForBinding() const { return Value(); }
+   void setValueForBinding(const String&);
+ 
++  // ForBinding wrappers for override hooks
++  String autocompleteForBinding(ScriptState*) const;
++  void setAutocompleteForBinding(ScriptState*, const String&);
++
+   // It is possible to pass WebAutofillState::kNotFilled here in case we need
+   // to simulate a reset of a <select> element.
+   void SetAutofillValue(const String& value, WebAutofillState);
+diff --git a/third_party/blink/renderer/core/html/forms/html_select_element.idl b/third_party/blink/renderer/core/html/forms/html_select_element.idl
+index 478a6fa89c0af281cf743e741152470196b3e384..158c0da3d6527706f2b1693db1fdb8b8d6c1a6c6 100644
+--- a/third_party/blink/renderer/core/html/forms/html_select_element.idl
++++ b/third_party/blink/renderer/core/html/forms/html_select_element.idl
+@@ -24,7 +24,7 @@
+     Exposed=Window
+ ] interface HTMLSelectElement : HTMLElement {
+     [HTMLConstructor] constructor();
+-    [CEReactions, ImplementedAs=IDLExposedAutofillValue] attribute DOMString autocomplete;
++    [CEReactions, CallWith=ScriptState, ImplementedAs=autocompleteForBinding] attribute DOMString autocomplete;
+     [CEReactions, Reflect] attribute boolean disabled;
+     // Until ReferenceTarget is enabled, this will only ever return HTMLFormElement.
+     // https://github.com/whatwg/html/pull/10995
+diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.cc b/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
+index 0bfe5e2cc2136cbe636b1b997b6cdcecac725d3b..ca2a67644ec8cdcc1e934e92276f8c6a13b5366d 100644
+--- a/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
++++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
+@@ -30,6 +30,7 @@
+ #include "third_party/blink/renderer/modules/cache_storage/cache_storage_trace_utils.h"
+ #include "third_party/blink/renderer/modules/cache_storage/cache_utils.h"
+ #include "third_party/blink/renderer/modules/service_worker/service_worker_global_scope.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/heap/persistent.h"
+@@ -607,6 +608,93 @@ void CacheStorage::KeysImpl(
+           base::TimeTicks::Now(), trace_id)));
+ }
+ 
++ScriptPromise<Cache> CacheStorage::openForBinding(
++    ScriptState* script_state,
++    const String& cache_name,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "cacheStorage", "openOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return open(script_state, cache_name, exception_state);
++}
++
++ScriptPromise<IDLBoolean> CacheStorage::hasForBinding(
++    ScriptState* script_state,
++    const String& cache_name,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "cacheStorage", "hasOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return has(script_state, cache_name, exception_state);
++}
++
++ScriptPromise<IDLBoolean> CacheStorage::DeleteForBinding(
++    ScriptState* script_state,
++    const String& cache_name,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "cacheStorage", "deleteOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return Delete(script_state, cache_name, exception_state);
++}
++
++ScriptPromise<IDLSequence<IDLString>> CacheStorage::keysForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "cacheStorage", "keysOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return keys(script_state, exception_state);
++}
++
+ ScriptPromise<Response> CacheStorage::match(
+     ScriptState* script_state,
+     const V8RequestInfo* request,
+diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.h b/third_party/blink/renderer/modules/cache_storage/cache_storage.h
+index 1ff4512e335e484af958afcafb69dbccc8c4f56d..edf8c25a989dc6abab9b1269208c1a2bcd72f366 100644
+--- a/third_party/blink/renderer/modules/cache_storage/cache_storage.h
++++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.h
+@@ -56,6 +56,19 @@ class CacheStorage final : public ScriptWrappable,
+                                 const MultiCacheQueryOptions* options,
+                                 ExceptionState& exception_state);
+ 
++  // ForBinding wrappers for override hooks
++  ScriptPromise<Cache> openForBinding(ScriptState*,
++                                      const String& cache_name,
++                                      ExceptionState&);
++  ScriptPromise<IDLBoolean> hasForBinding(ScriptState*,
++                                          const String& cache_name,
++                                          ExceptionState&);
++  ScriptPromise<IDLBoolean> DeleteForBinding(ScriptState*,
++                                             const String& cache_name,
++                                             ExceptionState&);
++  ScriptPromise<IDLSequence<IDLString>> keysForBinding(ScriptState*,
++                                                       ExceptionState&);
++
+   bool HasPendingActivity() const override;
+   void Trace(Visitor*) const override;
+ 
+diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.idl b/third_party/blink/renderer/modules/cache_storage/cache_storage.idl
+index 850d5708824a67454b2e3bb1e7793895bc8cfbfd..c2e5a2182cbc6c6c95765aaade9294303f4eeca6 100644
+--- a/third_party/blink/renderer/modules/cache_storage/cache_storage.idl
++++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.idl
+@@ -12,14 +12,14 @@
+   Promise<Response> match(RequestInfo request,
+                      optional MultiCacheQueryOptions options = {});
+ 
+-  [CallWith=ScriptState, MeasureAs=CacheStorageRead, RaisesException]
++  [CallWith=ScriptState, MeasureAs=CacheStorageRead, RaisesException, ImplementedAs=hasForBinding]
+   Promise<boolean> has(DOMString cacheName);
+ 
+-  [CallWith=ScriptState, RaisesException] Promise<Cache> open(DOMString cacheName);
++  [CallWith=ScriptState, RaisesException, ImplementedAs=openForBinding] Promise<Cache> open(DOMString cacheName);
+ 
+-  [CallWith=ScriptState, MeasureAs=CacheStorageWrite, ImplementedAs=Delete, RaisesException]
++  [CallWith=ScriptState, MeasureAs=CacheStorageWrite, ImplementedAs=DeleteForBinding, RaisesException]
+   Promise<boolean> delete(DOMString cacheName);
+ 
+-  [CallWith=ScriptState, MeasureAs=CacheStorageRead, RaisesException]
++  [CallWith=ScriptState, MeasureAs=CacheStorageRead, RaisesException, ImplementedAs=keysForBinding]
+   Promise<sequence<DOMString>> keys();
+ };
+diff --git a/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.cc b/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.cc
+index bca387450bf1264b9b417b104bba6d12f8cf240d..48aa076484dd412debcc60f7b9b185a8a16d51e1 100644
+--- a/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.cc
++++ b/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.cc
+@@ -10,6 +10,8 @@
+ #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h"
+ #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
+ #include "third_party/blink/renderer/modules/canvas/htmlcanvas/canvas_context_creation_attributes_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/text/layout_locale.h"
+ 
+ namespace blink {
+@@ -41,6 +43,27 @@ V8RenderingContext* HTMLCanvasElementModule::getContext(
+   return context->AsV8RenderingContext();
+ }
+ 
++V8RenderingContext* HTMLCanvasElementModule::getContextForBinding(
++    ScriptState* script_state,
++    HTMLCanvasElement& canvas,
++    const String& context_id,
++    const CanvasContextCreationAttributesModule* attributes,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "htmlCanvasElement", "getContextOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Isolate* isolate = script_state->GetIsolate();
++      v8::Local<v8::Value> args[] = {V8String(isolate, context_id)};
++      override_fn
++          ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++          .ToLocalChecked();
++    }
++  }
++  return getContext(script_state, canvas, context_id, attributes,
++                    exception_state);
++}
++
+ OffscreenCanvas* HTMLCanvasElementModule::transferControlToOffscreen(
+     ScriptState* script_state,
+     HTMLCanvasElement& canvas,
+diff --git a/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.h b/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.h
+index 2b762aef04226edb4db3e4443ee592550c8ca021..1c0e153d0b431f4b85f59a196f6b302859c93e45 100644
+--- a/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.h
++++ b/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.h
+@@ -30,6 +30,12 @@ class MODULES_EXPORT HTMLCanvasElementModule {
+       const String& context_id,
+       const CanvasContextCreationAttributesModule* attributes,
+       ExceptionState& exception_state);
++  static V8RenderingContext* getContextForBinding(
++      ScriptState* script_state,
++      HTMLCanvasElement& canvas,
++      const String& context_id,
++      const CanvasContextCreationAttributesModule* attributes,
++      ExceptionState& exception_state);
+   static OffscreenCanvas* transferControlToOffscreen(ScriptState*,
+                                                      HTMLCanvasElement&,
+                                                      ExceptionState&);
+diff --git a/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.idl b/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.idl
+index 05b71b33d246c94758a450f9aaa0934c501afa74..4fe4c19565f112851453f52b949ed6e21d6dc3e6 100644
+--- a/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.idl
++++ b/third_party/blink/renderer/modules/canvas/htmlcanvas/html_canvas_element_module.idl
+@@ -16,7 +16,7 @@ typedef (CanvasRenderingContext2D or
+     ImplementedAs=HTMLCanvasElementModule
+ ] partial interface HTMLCanvasElement
+ {
+-    [CallWith=ScriptState, MeasureAs=HTMLCanvasGetContext, RaisesException] RenderingContext? getContext(DOMString contextId, optional CanvasContextCreationAttributesModule attributes = {});
++    [CallWith=ScriptState, MeasureAs=HTMLCanvasGetContext, RaisesException, ImplementedAs=getContextForBinding] RenderingContext? getContext(DOMString contextId, optional CanvasContextCreationAttributesModule attributes = {});
+ 
+     [CallWith=ScriptState,
+      RaisesException, MeasureAs=OffscreenCanvas] OffscreenCanvas transferControlToOffscreen();
+diff --git a/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.cc b/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.cc
+index 26193b2601585c25008c18b1fa507d840263b8aa..0196608a25e1b4372a681bf18b990b848b6122af 100644
+--- a/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.cc
++++ b/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.cc
+@@ -10,6 +10,8 @@
+ #include "third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h"
+ #include "third_party/blink/renderer/modules/canvas/htmlcanvas/canvas_context_creation_attributes_helpers.h"
+ #include "third_party/blink/renderer/modules/canvas/offscreencanvas2d/offscreen_canvas_rendering_context_2d.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ 
+ namespace blink {
+ 
+@@ -62,4 +64,25 @@ V8OffscreenRenderingContext* OffscreenCanvasModule::getContext(
+   return context->AsV8OffscreenRenderingContext();
+ }
+ 
++V8OffscreenRenderingContext* OffscreenCanvasModule::getContextForBinding(
++    ScriptState* script_state,
++    OffscreenCanvas& offscreen_canvas,
++    const V8OffscreenRenderingContextType& context_type,
++    const CanvasContextCreationAttributesModule* attributes,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "offscreenCanvas", "getContextOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Isolate* isolate = script_state->GetIsolate();
++      v8::Local<v8::Value> args[] = {
++          V8String(isolate, context_type.AsString())};
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 1, args);
++    }
++  }
++  return getContext(script_state, offscreen_canvas, context_type, attributes,
++                    exception_state);
++}
++
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.h b/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.h
+index 8c1437b7eab936a25af8a6ba37ea8f35bd111a56..a6712724bf467d349de5d91b4b2bdafb0cf8fb0f 100644
+--- a/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.h
++++ b/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.h
+@@ -28,6 +28,12 @@ class MODULES_EXPORT OffscreenCanvasModule {
+       const V8OffscreenRenderingContextType& context_id,
+       const CanvasContextCreationAttributesModule* attributes,
+       ExceptionState& exception_state);
++  static V8OffscreenRenderingContext* getContextForBinding(
++      ScriptState* script_state,
++      OffscreenCanvas& offscreen_canvas,
++      const V8OffscreenRenderingContextType& context_id,
++      const CanvasContextCreationAttributesModule* attributes,
++      ExceptionState& exception_state);
+ };
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.idl b/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.idl
+index a15d8d671f7504c9e771e607485413728479423b..8f226ba405f516a2434fd370e629a0663e5323c0 100644
+--- a/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.idl
++++ b/third_party/blink/renderer/modules/canvas/offscreencanvas/offscreen_canvas_module.idl
+@@ -16,5 +16,5 @@ enum OffscreenRenderingContextType { "2d", "webgl", "webgl2", "bitmaprenderer",
+ [
+     ImplementedAs=OffscreenCanvasModule
+ ] partial interface OffscreenCanvas {
+-    [CallWith=ScriptState, RaisesException] OffscreenRenderingContext? getContext(OffscreenRenderingContextType contextType, optional CanvasContextCreationAttributesModule attributes = {});
++    [CallWith=ScriptState, RaisesException, ImplementedAs=getContextForBinding] OffscreenRenderingContext? getContext(OffscreenRenderingContextType contextType, optional CanvasContextCreationAttributesModule attributes = {});
+ };
+diff --git a/third_party/blink/renderer/modules/font_access/font_access.cc b/third_party/blink/renderer/modules/font_access/font_access.cc
+index 427b5a905aeaee9771fb430bdeaeea81a9cff95a..54af8dd0155ba0f2a54182d2799994878fa5fd50 100644
+--- a/third_party/blink/renderer/modules/font_access/font_access.cc
++++ b/third_party/blink/renderer/modules/font_access/font_access.cc
+@@ -22,6 +22,7 @@
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/modules/font_access/font_metadata.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ 
+ namespace blink {
+@@ -40,6 +41,30 @@ void FontAccess::Trace(blink::Visitor* visitor) const {
+   visitor->Trace(remote_);
+ }
+ 
++// static
++ScriptPromise<IDLSequence<FontMetadata>> FontAccess::queryLocalFontsForBinding(
++    ScriptState* script_state,
++    LocalDOMWindow& window,
++    const QueryOptions* options,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "window", "queryLocalFontsOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return queryLocalFonts(script_state, window, options, exception_state);
++}
++
+ // static
+ ScriptPromise<IDLSequence<FontMetadata>> FontAccess::queryLocalFonts(
+     ScriptState* script_state,
+diff --git a/third_party/blink/renderer/modules/font_access/font_access.h b/third_party/blink/renderer/modules/font_access/font_access.h
+index f7822de10c6cba80731744bca0b3e95d81b53df5..f067a9dc98963b4f9a2818dc5e0790bb56959ceb 100644
+--- a/third_party/blink/renderer/modules/font_access/font_access.h
++++ b/third_party/blink/renderer/modules/font_access/font_access.h
+@@ -27,6 +27,13 @@ class FontAccess final : public GarbageCollected<FontAccess>,
+ 
+   void Trace(blink::Visitor* visitor) const override;
+ 
++  // ForBinding wrapper that notifies custom overrides before delegating.
++  static ScriptPromise<IDLSequence<FontMetadata>> queryLocalFontsForBinding(
++      ScriptState* script_state,
++      LocalDOMWindow& window,
++      const QueryOptions* options,
++      ExceptionState& exception_state);
++
+   // Web-exposed interface:
+   static ScriptPromise<IDLSequence<FontMetadata>> queryLocalFonts(
+       ScriptState* script_state,
+diff --git a/third_party/blink/renderer/modules/font_access/window_font_access.idl b/third_party/blink/renderer/modules/font_access/window_font_access.idl
+index 9b4b8710edb34491dc289bdd2d1836b182937b13..a2166e90c61212c2cf56e4439790ae941967c6ca 100644
+--- a/third_party/blink/renderer/modules/font_access/window_font_access.idl
++++ b/third_party/blink/renderer/modules/font_access/window_font_access.idl
+@@ -8,7 +8,7 @@
+     RuntimeEnabled=FontAccess,
+     ImplementedAs=FontAccess
+ ] partial interface Window {
+-    [CallWith=ScriptState, RaisesException, Measure]
++    [CallWith=ScriptState, RaisesException, Measure, ImplementedAs=queryLocalFontsForBinding]
+     Promise<sequence<FontData>> queryLocalFonts(
+         optional QueryOptions options = {});
+ };
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+index 552e5dd036ee5b12c299d1022389237ca8eac8a1..8a4571976b29a09627b81d061803706647d24747 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+@@ -203,6 +203,22 @@ ScriptPromise<IDLUndefined> ScreenOrientation::lock(
+   return promise;
+ }
+ 
++ScriptPromise<IDLUndefined> ScreenOrientation::lockForBinding(
++    ScriptState* state,
++    const V8OrientationLockType& orientation,
++    ExceptionState& exception_state) {
++  if (state && state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        state, "screenOrientation", "lockOverride");
++    if (!override_fn.IsEmpty()) {
++      override_fn->Call(state->GetContext(),
++                        v8::Undefined(state->GetIsolate()), 0, nullptr)
++          .ToLocalChecked();
++    }
++  }
++  return lock(state, orientation, exception_state);
++}
++
+ void ScreenOrientation::unlock() {
+   if (!Controller())
+     return;
+@@ -210,6 +226,19 @@ void ScreenOrientation::unlock() {
+   Controller()->unlock();
+ }
+ 
++void ScreenOrientation::unlockForBinding(ScriptState* script_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "screenOrientation", "unlockOverride");
++    if (!override_fn.IsEmpty()) {
++      override_fn->Call(script_state->GetContext(),
++                        v8::Undefined(script_state->GetIsolate()), 0, nullptr)
++          .ToLocalChecked();
++    }
++  }
++  unlock();
++}
++
+ ScreenOrientationController* ScreenOrientation::Controller() {
+   if (!GetExecutionContext())
+     return nullptr;
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
+index c0c4555eb521434e5ca9eeb16b3a53b9f7b7ff63..92b7727946c051772d5f1894c688c9c0d3527a23 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
+@@ -50,7 +50,11 @@ class MODULES_EXPORT ScreenOrientation final : public EventTarget,
+   ScriptPromise<IDLUndefined> lock(ScriptState*,
+                                    const V8OrientationLockType& orientation,
+                                    ExceptionState&);
++  ScriptPromise<IDLUndefined> lockForBinding(ScriptState*,
++                                              const V8OrientationLockType& orientation,
++                                              ExceptionState&);
+   void unlock();
++  void unlockForBinding(ScriptState*);
+ 
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(change, kChange)
+ 
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
+index e879d082658a16016c5b700117efaa7836594194..e06590e48ed483056fbb4b36620068a9af41da3a 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
+@@ -27,8 +27,8 @@ interface ScreenOrientation : EventTarget {
+     [MeasureAs=ScreenOrientationAngle, CallWith=ScriptState, ImplementedAs=angleForBinding] readonly attribute unsigned short angle;
+     [MeasureAs=ScreenOrientationType, CallWith=ScriptState, ImplementedAs=typeForBinding] readonly attribute OrientationType type;
+ 
+-    [CallWith=ScriptState, MeasureAs=ScreenOrientationLock, RaisesException] Promise<undefined> lock(OrientationLockType orientation);
+-    [MeasureAs=ScreenOrientationUnlock] void unlock();
++    [CallWith=ScriptState, MeasureAs=ScreenOrientationLock, RaisesException, ImplementedAs=lockForBinding] Promise<undefined> lock(OrientationLockType orientation);
++    [MeasureAs=ScreenOrientationUnlock, CallWith=ScriptState, ImplementedAs=unlockForBinding] void unlock();
+ 
+     attribute EventHandler onchange;
+ };
+diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_container.cc b/third_party/blink/renderer/modules/service_worker/service_worker_container.cc
+index e28d98348ddbc23e67dbe7cc0628051d380f8f42..cefeed0f877328138ec0cb4c51913b4eecf433b9 100644
+--- a/third_party/blink/renderer/modules/service_worker/service_worker_container.cc
++++ b/third_party/blink/renderer/modules/service_worker/service_worker_container.cc
+@@ -66,6 +66,7 @@
+ #include "third_party/blink/renderer/modules/service_worker/service_worker.h"
+ #include "third_party/blink/renderer/modules/service_worker/service_worker_error.h"
+ #include "third_party/blink/renderer/modules/service_worker/service_worker_registration.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_throw_exception.h"
+@@ -607,6 +608,56 @@ ServiceWorkerContainer::getRegistrations(ScriptState* script_state) {
+   return promise;
+ }
+ 
++ScriptPromise<ServiceWorkerRegistration>
++ServiceWorkerContainer::registerServiceWorkerForBinding(
++    ScriptState* script_state,
++    const V8UnionTrustedScriptURLOrUSVString* scriptURL,
++    const RegistrationOptions* options,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "serviceWorkerContainer", "registerOverride");
++    if (!override_fn.IsEmpty()) {
++      override_fn->Call(script_state->GetContext(),
++                        v8::Undefined(script_state->GetIsolate()), 0, nullptr)
++          .ToLocalChecked();
++    }
++  }
++  return registerServiceWorker(script_state, scriptURL, options,
++                               exception_state);
++}
++
++ScriptPromise<ServiceWorkerRegistration>
++ServiceWorkerContainer::getRegistrationForBinding(
++    ScriptState* script_state,
++    const String& document_url) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "serviceWorkerContainer", "getRegistrationOverride");
++    if (!override_fn.IsEmpty()) {
++      override_fn->Call(script_state->GetContext(),
++                        v8::Undefined(script_state->GetIsolate()), 0, nullptr)
++          .ToLocalChecked();
++    }
++  }
++  return getRegistration(script_state, document_url);
++}
++
++ScriptPromise<IDLSequence<ServiceWorkerRegistration>>
++ServiceWorkerContainer::getRegistrationsForBinding(
++    ScriptState* script_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "serviceWorkerContainer", "getRegistrationsOverride");
++    if (!override_fn.IsEmpty()) {
++      override_fn->Call(script_state->GetContext(),
++                        v8::Undefined(script_state->GetIsolate()), 0, nullptr)
++          .ToLocalChecked();
++    }
++  }
++  return getRegistrations(script_state);
++}
++
+ ScriptPromise<ServiceWorkerRegistration>
+ ServiceWorkerContainer::registerServiceWorkerWithoutTrustedTypes(
+     ScriptState* script_state,
+diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_container.h b/third_party/blink/renderer/modules/service_worker/service_worker_container.h
+index b618d098f081f68ec5513ec6554e1a1e69919ca0..3f36fa7e720693f54b1bd8c8b41ce28998fe3e4c 100644
+--- a/third_party/blink/renderer/modules/service_worker/service_worker_container.h
++++ b/third_party/blink/renderer/modules/service_worker/service_worker_container.h
+@@ -85,11 +85,21 @@ class MODULES_EXPORT ServiceWorkerContainer final
+       const V8UnionTrustedScriptURLOrUSVString* scriptURL,
+       const RegistrationOptions*,
+       ExceptionState&);
++  ScriptPromise<ServiceWorkerRegistration> registerServiceWorkerForBinding(
++      ScriptState*,
++      const V8UnionTrustedScriptURLOrUSVString* scriptURL,
++      const RegistrationOptions*,
++      ExceptionState&);
+   ScriptPromise<ServiceWorkerRegistration> getRegistration(
+       ScriptState*,
+       const String& document_url);
++  ScriptPromise<ServiceWorkerRegistration> getRegistrationForBinding(
++      ScriptState*,
++      const String& document_url);
+   ScriptPromise<IDLSequence<ServiceWorkerRegistration>> getRegistrations(
+       ScriptState*);
++  ScriptPromise<IDLSequence<ServiceWorkerRegistration>> getRegistrationsForBinding(
++      ScriptState*);
+ 
+   ScriptPromise<ServiceWorkerRegistration>
+   registerServiceWorkerWithoutTrustedTypes(ScriptState*,
+diff --git a/third_party/blink/renderer/modules/service_worker/service_worker_container.idl b/third_party/blink/renderer/modules/service_worker/service_worker_container.idl
+index f9f415a943c7591f17c4c29021886e4ae01f0e83..8a56eb800841a8f916d0cbe283a34d20e5f98b44 100644
+--- a/third_party/blink/renderer/modules/service_worker/service_worker_container.idl
++++ b/third_party/blink/renderer/modules/service_worker/service_worker_container.idl
+@@ -38,9 +38,9 @@
+     readonly attribute ServiceWorker? controller;
+     [CallWith=ScriptState, RaisesException] readonly attribute Promise<ServiceWorkerRegistration> ready;
+ 
+-    [CallWith=ScriptState, ImplementedAs=registerServiceWorker, RaisesException] Promise<ServiceWorkerRegistration> register((USVString or TrustedScriptURL) url, optional RegistrationOptions options = {});
+-    [CallWith=ScriptState] Promise<ServiceWorkerRegistration> getRegistration(optional USVString documentURL = "");
+-    [CallWith=ScriptState] Promise<sequence<ServiceWorkerRegistration>> getRegistrations();
++    [CallWith=ScriptState, ImplementedAs=registerServiceWorkerForBinding, RaisesException] Promise<ServiceWorkerRegistration> register((USVString or TrustedScriptURL) url, optional RegistrationOptions options = {});
++    [CallWith=ScriptState, ImplementedAs=getRegistrationForBinding] Promise<ServiceWorkerRegistration> getRegistration(optional USVString documentURL = "");
++    [CallWith=ScriptState, ImplementedAs=getRegistrationsForBinding] Promise<sequence<ServiceWorkerRegistration>> getRegistrations();
+ 
+     void startMessages();
+ 
+diff --git a/third_party/blink/renderer/modules/vibration/navigator_vibration.idl b/third_party/blink/renderer/modules/vibration/navigator_vibration.idl
+index 9e470c1e82580425600360b19c51856ac0dd2893..902a5a762cf116ba6fa8e0ab35a54d6f6f2e7337 100644
+--- a/third_party/blink/renderer/modules/vibration/navigator_vibration.idl
++++ b/third_party/blink/renderer/modules/vibration/navigator_vibration.idl
+@@ -25,6 +25,6 @@
+     // FIXME: should be union type https://crbug.com/240176
+     // FIXME: The contents of the pattern argument should be clamped.
+     // See https://code.google.com/p/chromium/issues/detail?id=310138
+-    boolean vibrate([Clamp] unsigned long pattern);
+-    boolean vibrate(sequence<unsigned long> pattern);
++    [CallWith=ScriptState, ImplementedAs=vibrateForBinding] boolean vibrate([Clamp] unsigned long pattern);
++    [CallWith=ScriptState, ImplementedAs=vibrateForBinding] boolean vibrate(sequence<unsigned long> pattern);
+ };
+diff --git a/third_party/blink/renderer/modules/vibration/vibration_controller.cc b/third_party/blink/renderer/modules/vibration/vibration_controller.cc
+index 6817c1a9479732ad9abf45ad825cca2144091e21..4e3c9ca5551d79d8343c90b2418cceeb0c324b41 100644
+--- a/third_party/blink/renderer/modules/vibration/vibration_controller.cc
++++ b/third_party/blink/renderer/modules/vibration/vibration_controller.cc
+@@ -28,6 +28,8 @@
+ #include "third_party/blink/renderer/core/frame/local_frame.h"
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+ #include "third_party/blink/renderer/core/page/page.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
+ 
+ // Maximum number of entries in a vibration pattern.
+ const unsigned kVibrationPatternLengthMax = 99;
+@@ -108,6 +110,24 @@ bool VibrationController::vibrate(Navigator& navigator,
+   return From(navigator).Vibrate(pattern);
+ }
+ 
++// static
++bool VibrationController::vibrateForBinding(ScriptState* script_state,
++                                            Navigator& navigator,
++                                            unsigned time) {
++  bool result = vibrate(navigator, time);
++  return MaybeBoolOverride(script_state, "navigator", "vibrateOverride",
++                           result);
++}
++
++// static
++bool VibrationController::vibrateForBinding(ScriptState* script_state,
++                                            Navigator& navigator,
++                                            const VibrationPattern& pattern) {
++  bool result = vibrate(navigator, pattern);
++  return MaybeBoolOverride(script_state, "navigator", "vibrateOverride",
++                           result);
++}
++
+ VibrationController::VibrationController(Navigator& navigator)
+     : ExecutionContextLifecycleObserver(navigator.DomWindow()),
+       PageVisibilityObserver(DomWindow()->GetFrame()->GetPage()),
+diff --git a/third_party/blink/renderer/modules/vibration/vibration_controller.h b/third_party/blink/renderer/modules/vibration/vibration_controller.h
+index 7b9e6e783fc3a69538c7a239e0928ca021ccc9a6..0e08012f0e12b3f516acc63f15c0ada54d0b654b 100644
+--- a/third_party/blink/renderer/modules/vibration/vibration_controller.h
++++ b/third_party/blink/renderer/modules/vibration/vibration_controller.h
+@@ -32,6 +32,7 @@
+ namespace blink {
+ 
+ class Navigator;
++class ScriptState;
+ class V8UnionUnsignedLongOrUnsignedLongSequence;
+ 
+ class MODULES_EXPORT VibrationController final
+@@ -45,6 +46,8 @@ class MODULES_EXPORT VibrationController final
+ 
+   static bool vibrate(Navigator&, unsigned time);
+   static bool vibrate(Navigator&, const VibrationPattern&);
++  static bool vibrateForBinding(ScriptState*, Navigator&, unsigned time);
++  static bool vibrateForBinding(ScriptState*, Navigator&, const VibrationPattern&);
+ 
+   explicit VibrationController(Navigator&);
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+index 8535ab9e877a30326f8c3da70a0c97557193d54f..3c6ecfe9b4f331585cb17b745d63087b6a7623a2 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.cc
+@@ -631,6 +631,27 @@ DynamicsCompressorNode* BaseAudioContext::createDynamicsCompressor(
+   return node;
+ }
+ 
++AnalyserNode* BaseAudioContext::createAnalyserForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "audioContext", "createAnalyserOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return createAnalyser(script_state, exception_state);
++}
++
+ AnalyserNode* BaseAudioContext::createAnalyser(
+     ScriptState* script_state,
+     ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.h b/third_party/blink/renderer/modules/webaudio/base_audio_context.h
+index 101bdc59ce6bbe32652767d7c369d6bf07586309..8f653cf6166f1e6d3249c6b987075b2cee04c33f 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.h
+@@ -125,6 +125,7 @@ class MODULES_EXPORT BaseAudioContext
+   }
+   AudioWorklet* audioWorklet() const;
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(statechange, kStatechange)
++  AnalyserNode* createAnalyserForBinding(ScriptState*, ExceptionState&);
+   AnalyserNode* createAnalyser(ScriptState*, ExceptionState&);
+   BiquadFilterNode* createBiquadFilter(ExceptionState&);
+   AudioBuffer* createBuffer(ScriptState*,
+diff --git a/third_party/blink/renderer/modules/webaudio/base_audio_context.idl b/third_party/blink/renderer/modules/webaudio/base_audio_context.idl
+index 4f5c604691195689487bb9df45ee2ec931490544..d56055fe4851df6385c4e48cc38c0687cf30b6db 100644
+--- a/third_party/blink/renderer/modules/webaudio/base_audio_context.idl
++++ b/third_party/blink/renderer/modules/webaudio/base_audio_context.idl
+@@ -26,7 +26,7 @@ callback DecodeSuccessCallback = void (AudioBuffer decodedData);
+     [SecureContext] readonly attribute AudioWorklet audioWorklet;
+     attribute EventHandler onstatechange;
+ 
+-    [RaisesException, MeasureAs=AudioContextCreateAnalyser, CallWith=ScriptState] AnalyserNode createAnalyser();
++    [RaisesException, MeasureAs=AudioContextCreateAnalyser, CallWith=ScriptState, ImplementedAs=createAnalyserForBinding] AnalyserNode createAnalyser();
+     [RaisesException, MeasureAs=AudioContextCreateBiquadFilter] BiquadFilterNode createBiquadFilter();
+     [RaisesException, CallWith=ScriptState] AudioBuffer createBuffer(unsigned long numberOfChannels, unsigned long numberOfFrames, float sampleRate);
+     [RaisesException, MeasureAs=AudioContextCreateBufferSource] AudioBufferSourceNode createBufferSource();
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index 16baf54b60282797d525b3b91d77f97213c570fa..c397fcdab06f9b698d2604a371da9ed507576682 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -40,6 +40,7 @@
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_completion_event.h"
+ #include "third_party/blink/renderer/modules/webaudio/offline_audio_destination_node.h"
+ #include "third_party/blink/renderer/platform/audio/audio_utilities.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_messages.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+@@ -172,6 +173,27 @@ void OfflineAudioContext::Trace(Visitor* visitor) const {
+   BaseAudioContext::Trace(visitor);
+ }
+ 
++ScriptPromise<AudioBuffer> OfflineAudioContext::startOfflineRenderingForBinding(
++    ScriptState* script_state,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "offlineAudioContext", "startRenderingOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return startOfflineRendering(script_state, exception_state);
++}
++
+ ScriptPromise<AudioBuffer> OfflineAudioContext::startOfflineRendering(
+     ScriptState* script_state,
+     ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.h b/third_party/blink/renderer/modules/webaudio/offline_audio_context.h
+index 57d5e83d30ff3c72126c168748018755603066c0..ec234ee349a52e00c0f5bbd60f55e1e7bd68c498 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.h
+@@ -68,6 +68,8 @@ class MODULES_EXPORT OfflineAudioContext final : public BaseAudioContext {
+ 
+   uint32_t length() const { return total_render_frames_; }
+ 
++  ScriptPromise<AudioBuffer> startOfflineRenderingForBinding(ScriptState*,
++                                                             ExceptionState&);
+   ScriptPromise<AudioBuffer> startOfflineRendering(ScriptState*,
+                                                    ExceptionState&);
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.idl b/third_party/blink/renderer/modules/webaudio/offline_audio_context.idl
+index c489fa9d80b444adab2ab42097f88ef9a90af62a..a182137c83bdbd742bb4e2485bc535dfda9daba3 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.idl
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.idl
+@@ -32,7 +32,7 @@
+     // Offline rendering
+     attribute EventHandler oncomplete;
+     readonly attribute unsigned long length;
+-    [CallWith=ScriptState, RaisesException, ImplementedAs=startOfflineRendering, MeasureAs=OfflineAudioContextStartRendering] Promise<AudioBuffer> startRendering();
++    [CallWith=ScriptState, RaisesException, ImplementedAs=startOfflineRenderingForBinding, MeasureAs=OfflineAudioContextStartRendering] Promise<AudioBuffer> startRendering();
+     [RaisesException, CallWith=ScriptState, ImplementedAs=suspendContext, MeasureAs=OfflineAudioContextSuspend] Promise<undefined> suspend(double suspendTime);
+     [RaisesException, MeasureAs=OfflineAudioContextResume, CallWith=ScriptState, ImplementedAs=resumeContext] Promise<undefined> resume();
+ };

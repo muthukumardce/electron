@@ -1,0 +1,884 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 17:59:25 +0530
+Subject: feat: add override hooks for 15 APIs (Batch 11)
+
+APIs: performance.getEntries/getEntriesByType/getEntriesByName,
+speechSynthesis.getVoices, WebGL.getSupportedExtensions,
+document.querySelector/querySelectorAll/getElementById/getElementsByClassName,
+networkInformation.type/effectiveType, screenOrientation.type,
+offscreenCanvas.convertToBlob, fontFaceSet.load, navigator.getBattery
+
+diff --git a/third_party/blink/renderer/core/css/font_face_set.cc b/third_party/blink/renderer/core/css/font_face_set.cc
+index a48ed608fcdad57fc4e605a2c87c19a5abe25cef..74f1a7efa7d6d976c6bf4e304ab13c41c66adb97 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.cc
++++ b/third_party/blink/renderer/core/css/font_face_set.cc
+@@ -230,6 +230,28 @@ ScriptPromise<IDLSequence<FontFace>> FontFaceSet::load(
+   return promise;
+ }
+ 
++ScriptPromise<IDLSequence<FontFace>> FontFaceSet::loadForBinding(
++    ScriptState* script_state,
++    const String& font_string,
++    const String& text) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "fontFaceSet", "loadOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return load(script_state, font_string, text);
++}
++
+ bool FontFaceSet::check(const String& font_string,
+                         const String& text,
+                         ExceptionState& exception_state) {
+diff --git a/third_party/blink/renderer/core/css/font_face_set.h b/third_party/blink/renderer/core/css/font_face_set.h
+index aae3daf8c6fec56cb3c071d89856a339c70c6455..4f452d9d71c03919deb6a706c315920149a557d8 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.h
++++ b/third_party/blink/renderer/core/css/font_face_set.h
+@@ -55,6 +55,9 @@ class CORE_EXPORT FontFaceSet : public EventTarget,
+   ScriptPromise<IDLSequence<FontFace>> load(ScriptState*,
+                                             const String& font,
+                                             const String& text);
++  ScriptPromise<IDLSequence<FontFace>> loadForBinding(ScriptState*,
++                                                      const String& font,
++                                                      const String& text);
+   virtual ScriptPromise<FontFaceSet> ready(ScriptState*) = 0;
+ 
+   ExecutionContext* GetExecutionContext() const override {
+diff --git a/third_party/blink/renderer/core/css/font_face_set.idl b/third_party/blink/renderer/core/css/font_face_set.idl
+index 38e3ec9fad3783056ef04726903ddbe33ff6d0d5..5626fbeb9efe9373e3c2c4c2a131dbdf40e52bc8 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.idl
++++ b/third_party/blink/renderer/core/css/font_face_set.idl
+@@ -47,7 +47,7 @@ enum FontFaceSetLoadStatus { "loading", "loaded" };
+ 
+     // check and start loads if appropriate
+     // and fulfill promise when all loads complete
+-    [CallWith=ScriptState] Promise<sequence<FontFace>> load(DOMString font, optional DOMString text = " ");
++    [CallWith=ScriptState, ImplementedAs=loadForBinding] Promise<sequence<FontFace>> load(DOMString font, optional DOMString text = " ");
+ 
+     // return whether all fonts in the fontlist are loaded
+     // (does not initiate load if not available)
+diff --git a/third_party/blink/renderer/core/dom/container_node.cc b/third_party/blink/renderer/core/dom/container_node.cc
+index e9c32e0b266d9964b9aa620ad16880bd13aeec19..65bd828db966b8caca9b0c8bb22e8544a561435d 100644
+--- a/third_party/blink/renderer/core/dom/container_node.cc
++++ b/third_party/blink/renderer/core/dom/container_node.cc
+@@ -23,6 +23,7 @@
+ 
+ #include "third_party/blink/renderer/core/dom/container_node.h"
+ 
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_get_html_options.h"
+ #include "third_party/blink/renderer/core/accessibility/ax_object_cache.h"
+ #include "third_party/blink/renderer/core/css/resolver/style_resolver.h"
+@@ -78,6 +79,7 @@
+ #include "third_party/blink/renderer/core/patching/patch_supplement.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/timing/soft_navigation_heuristics.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/runtime_call_stats.h"
+ #include "third_party/blink/renderer/platform/bindings/script_forbidden_scope.h"
+@@ -1518,6 +1520,56 @@ StaticElementList* ContainerNode::querySelectorAll(
+   return QuerySelectorAll(selectors, exception_state);
+ }
+ 
++Element* ContainerNode::querySelectorForBinding(
++    ScriptState* script_state,
++    const AtomicString& selectors,
++    ExceptionState& exception_state) {
++  Element* result = querySelector(selectors, exception_state);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "document", "querySelectorOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<Element>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
++StaticElementList* ContainerNode::querySelectorAllForBinding(
++    ScriptState* script_state,
++    const AtomicString& selectors,
++    ExceptionState& exception_state) {
++  StaticElementList* result = querySelectorAll(selectors, exception_state);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "document", "querySelectorAllOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<StaticElementList>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ unsigned ContainerNode::CountChildren() const {
+   unsigned count = 0;
+   for (Node* node = firstChild(); node; node = node->nextSibling())
+@@ -1782,6 +1834,30 @@ HTMLCollection* ContainerNode::getElementsByClassName(
+                                                  class_names);
+ }
+ 
++HTMLCollection* ContainerNode::getElementsByClassNameForBinding(
++    ScriptState* script_state,
++    const AtomicString& class_names) {
++  HTMLCollection* result = getElementsByClassName(class_names);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "document", "getElementsByClassNameOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<HTMLCollection>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ RadioNodeList* ContainerNode::GetRadioNodeList(const AtomicString& name,
+                                                bool only_match_img_elements) {
+   DCHECK(IsA<HTMLFormElement>(this) || IsA<HTMLFieldSetElement>(this));
+@@ -1838,6 +1914,30 @@ Element* ContainerNode::getElementById(const AtomicString& id) const {
+   return nullptr;
+ }
+ 
++Element* ContainerNode::getElementByIdForBinding(
++    ScriptState* script_state,
++    const AtomicString& id) const {
++  Element* result = getElementById(id);
++  if (!result || !script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "document", "getElementByIdOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<Element>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ NodeListsNodeData& ContainerNode::EnsureNodeLists() {
+   return EnsureRareData().EnsureNodeLists();
+ }
+diff --git a/third_party/blink/renderer/core/dom/container_node.h b/third_party/blink/renderer/core/dom/container_node.h
+index 4667ca8c8e09480b2ee5bd3210ac5db16c92eee6..919f2147a482d66fe4e5a8ab54959e7e8fc1d5cd 100644
+--- a/third_party/blink/renderer/core/dom/container_node.h
++++ b/third_party/blink/renderer/core/dom/container_node.h
+@@ -150,6 +150,20 @@ class CORE_EXPORT ContainerNode : public Node {
+                                          const AtomicString& local_name);
+   NodeList* getElementsByName(const AtomicString& element_name);
+   HTMLCollection* getElementsByClassName(const AtomicString& class_names);
++
++  // ForBinding wrappers for override hooks
++  Element* querySelectorForBinding(ScriptState*,
++                                   const AtomicString& selectors,
++                                   ExceptionState&);
++  StaticElementList* querySelectorAllForBinding(ScriptState*,
++                                                const AtomicString& selectors,
++                                                ExceptionState&);
++  Element* getElementByIdForBinding(ScriptState*,
++                                    const AtomicString& id) const;
++  HTMLCollection* getElementsByClassNameForBinding(
++      ScriptState*,
++      const AtomicString& class_names);
++
+   RadioNodeList* GetRadioNodeList(const AtomicString&,
+                                   bool only_match_img_elements = false);
+ 
+diff --git a/third_party/blink/renderer/core/dom/document.idl b/third_party/blink/renderer/core/dom/document.idl
+index 733919dd6f16da8716bc9beeeca1e8aa8794de24..b0dc95c91daf9885fe86d45acb632f51ab51c600 100644
+--- a/third_party/blink/renderer/core/dom/document.idl
++++ b/third_party/blink/renderer/core/dom/document.idl
+@@ -47,7 +47,7 @@ typedef (HTMLScriptElement or SVGScriptElement) HTMLOrSVGScriptElement;
+     readonly attribute Element? documentElement;
+     [Affects=Nothing] HTMLCollection getElementsByTagName(DOMString localName);
+     [Affects=Nothing] HTMLCollection getElementsByTagNameNS(DOMString? namespaceURI, DOMString localName);
+-    [Affects=Nothing] HTMLCollection getElementsByClassName(DOMString classNames);
++    [Affects=Nothing, CallWith=ScriptState, ImplementedAs=getElementsByClassNameForBinding] HTMLCollection getElementsByClassName(DOMString classNames);
+ 
+     [NewObject, PerWorldBindings, RaisesException, ImplementedAs=CreateElementForBinding] Element createElement(DOMString localName);
+     [NewObject, RaisesException] Element createElementNS(DOMString? namespaceURI, DOMString qualifiedName);
+diff --git a/third_party/blink/renderer/core/dom/non_element_parent_node.idl b/third_party/blink/renderer/core/dom/non_element_parent_node.idl
+index 37bf01d0fae35cb165103ccec0fc4eb58d85f368..d6c178c52011dfba8878079b1eda8135b7ae03d9 100644
+--- a/third_party/blink/renderer/core/dom/non_element_parent_node.idl
++++ b/third_party/blink/renderer/core/dom/non_element_parent_node.idl
+@@ -4,5 +4,5 @@
+ 
+ // https://dom.spec.whatwg.org/#interface-nonelementparentnode
+ interface mixin NonElementParentNode {
+-   [PerWorldBindings] Element? getElementById(DOMString elementId);
++   [PerWorldBindings, CallWith=ScriptState, ImplementedAs=getElementByIdForBinding] Element? getElementById(DOMString elementId);
+ };
+diff --git a/third_party/blink/renderer/core/dom/parent_node.idl b/third_party/blink/renderer/core/dom/parent_node.idl
+index c9ee2ce2b0c5195ba2be478a841ca9ef02a9e059..5803bf41bf0b915df892f76289464783ce4b48b2 100644
+--- a/third_party/blink/renderer/core/dom/parent_node.idl
++++ b/third_party/blink/renderer/core/dom/parent_node.idl
+@@ -40,8 +40,8 @@ interface mixin ParentNode {
+   [Unscopable, RaisesException, CEReactions] undefined replaceChildren((Node or DOMString or TrustedScript)... nodes);
+   [CEReactions, PerWorldBindings, RaisesException, MeasureAs="WebDXFeature::kMoveBefore"] undefined moveBefore(Node node, Node? child);
+ 
+-  [Affects=Nothing, RaisesException] Element? querySelector(DOMString selectors);
+-  [Affects=Nothing, NewObject, RaisesException] NodeList querySelectorAll(DOMString selectors);
++  [Affects=Nothing, RaisesException, CallWith=ScriptState, ImplementedAs=querySelectorForBinding] Element? querySelector(DOMString selectors);
++  [Affects=Nothing, NewObject, RaisesException, CallWith=ScriptState, ImplementedAs=querySelectorAllForBinding] NodeList querySelectorAll(DOMString selectors);
+   [RuntimeEnabled=DocumentPatching, CallWith=ScriptState, RaisesException] WritableStream patchSelf();
+   [RuntimeEnabled=DocumentPatching, CallWith=ScriptState, RaisesException] WritableStream patchBetween(Node prev_child, Node next_child);
+   [RuntimeEnabled=DocumentPatching, CallWith=ScriptState, RaisesException] WritableStream patchAfter(Node ref);
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+index 031ecfad32b5694cac1e83ff293e58b2af4e2563..e8838327ad57343d8d0f76a212bd824161b1e65f 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.cc
+@@ -390,6 +390,28 @@ ScriptPromise<Blob> OffscreenCanvas::convertToBlob(
+   return EmptyPromise();
+ }
+ 
++ScriptPromise<Blob> OffscreenCanvas::convertToBlobForBinding(
++    ScriptState* script_state,
++    const ImageEncodeOptions* options,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "offscreenCanvas", "convertToBlobOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return convertToBlob(script_state, options, exception_state);
++}
++
+ bool OffscreenCanvas::IsOpaque() const {
+   return context_ && !context_->CreationAttributes().alpha;
+ }
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h
+index c47fae20f87ab17661b8df97e3f2dca3b42d8c3c..a09cf9fd848e4b418f66bec57bc8dd86e97fe3f7 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.h
+@@ -67,6 +67,9 @@ class CORE_EXPORT OffscreenCanvas final
+   ScriptPromise<Blob> convertToBlob(ScriptState* script_state,
+                                     const ImageEncodeOptions* options,
+                                     ExceptionState& exception_state);
++  ScriptPromise<Blob> convertToBlobForBinding(ScriptState* script_state,
++                                              const ImageEncodeOptions* options,
++                                              ExceptionState& exception_state);
+ 
+   void SetSize(gfx::Size);
+   void RecordTransfer();
+diff --git a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl
+index cbcd4223ee8ed91a16b844aa95156b3d102e30b8..07bb789092c3cc76126603ab398bc96b7db7a6b6 100644
+--- a/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl
++++ b/third_party/blink/renderer/core/offscreencanvas/offscreen_canvas.idl
+@@ -13,7 +13,7 @@
+     attribute [EnforceRange] unsigned long height;
+ 
+     [CallWith=ScriptState, MeasureAs=OffscreenCanvasTransferToImageBitmap, RaisesException, ImplementedAs=transferToImageBitmapForBinding] ImageBitmap transferToImageBitmap();
+-    [CallWith=ScriptState, MeasureAs=OffscreenCanvasConvertToBlob, RaisesException] Promise<Blob> convertToBlob(optional ImageEncodeOptions options = {});
++    [CallWith=ScriptState, MeasureAs=OffscreenCanvasConvertToBlob, RaisesException, ImplementedAs=convertToBlobForBinding] Promise<Blob> convertToBlob(optional ImageEncodeOptions options = {});
+ 
+     attribute EventHandler oncontextlost;
+     attribute EventHandler oncontextrestored;
+diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
+index 99fe6237de219f3e31f172f31bcac102fd2997c4..1e990c938f7de787d3205d49ce61c1b01bd1a6a4 100644
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -357,6 +357,29 @@ PerformanceEntryVector Performance::getEntries() {
+   return GetEntriesForCurrentFrame();
+ }
+ 
++PerformanceEntryVector Performance::getEntriesForBinding(
++    ScriptState* script_state) {
++  PerformanceEntryVector result = getEntries();
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "performance", "getEntriesOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<IDLSequence<PerformanceEntry>>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ PerformanceEntryVector Performance::GetEntriesForCurrentFrame(
+     const AtomicString& maybe_name) {
+   PerformanceEntryVector entries;
+@@ -438,6 +461,30 @@ PerformanceEntryVector Performance::getEntriesByType(
+   return GetEntriesByTypeForCurrentFrame(entry_type);
+ }
+ 
++PerformanceEntryVector Performance::getEntriesByTypeForBinding(
++    ScriptState* script_state,
++    const AtomicString& entry_type) {
++  PerformanceEntryVector result = getEntriesByType(entry_type);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "performance", "getEntriesByTypeOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<IDLSequence<PerformanceEntry>>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ PerformanceEntryVector Performance::GetEntriesByTypeForCurrentFrame(
+     const AtomicString& entry_type,
+     const AtomicString& maybe_name) {
+@@ -607,6 +654,31 @@ PerformanceEntryVector Performance::getEntriesByName(
+   return entries;
+ }
+ 
++PerformanceEntryVector Performance::getEntriesByNameForBinding(
++    ScriptState* script_state,
++    const AtomicString& name,
++    const AtomicString& entry_type) {
++  PerformanceEntryVector result = getEntriesByName(name, entry_type);
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "performance", "getEntriesByNameOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<IDLSequence<PerformanceEntry>>::ToV8(script_state, result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ void Performance::clearResourceTimings() {
+   resource_timing_buffer_.clear();
+ }
+diff --git a/third_party/blink/renderer/core/timing/performance.h b/third_party/blink/renderer/core/timing/performance.h
+index 53c914bae1985a05d106b2f3a22b9cbaf91bb4ad..e12d0413650bb3e8f5192e541840297f92446940 100644
+--- a/third_party/blink/renderer/core/timing/performance.h
++++ b/third_party/blink/renderer/core/timing/performance.h
+@@ -177,6 +177,16 @@ class CORE_EXPORT Performance : public EventTarget {
+       const AtomicString& name,
+       const AtomicString& entry_type = g_null_atom);
+ 
++  // ForBinding wrappers for override hooks
++  PerformanceEntryVector getEntriesForBinding(ScriptState*);
++  PerformanceEntryVector getEntriesByTypeForBinding(
++      ScriptState*,
++      const AtomicString& entry_type);
++  PerformanceEntryVector getEntriesByNameForBinding(
++      ScriptState*,
++      const AtomicString& name,
++      const AtomicString& entry_type = g_null_atom);
++
+   void clearResourceTimings();
+   void setResourceTimingBufferSize(unsigned);
+   void setBackForwardCacheRestorationBufferSizeForTest(unsigned);
+diff --git a/third_party/blink/renderer/core/timing/performance.idl b/third_party/blink/renderer/core/timing/performance.idl
+index 33e35084f3806f46e276c3cdce18baca4d043b9d..d8354ba6380191191484e8bf888dd51476a1e4f2 100644
+--- a/third_party/blink/renderer/core/timing/performance.idl
++++ b/third_party/blink/renderer/core/timing/performance.idl
+@@ -40,9 +40,9 @@ interface Performance : EventTarget {
+ 
+     // Performance Timeline
+     // https://w3c.github.io/performance-timeline/#the-performance-interface
+-    [MeasureAs=PerformanceTimeline] PerformanceEntryList getEntries();
+-    [MeasureAs=PerformanceTimeline] PerformanceEntryList getEntriesByType(DOMString entryType);
+-    [MeasureAs=PerformanceTimeline] PerformanceEntryList getEntriesByName(DOMString name, optional DOMString entryType);
++    [MeasureAs=PerformanceTimeline, CallWith=ScriptState, ImplementedAs=getEntriesForBinding] PerformanceEntryList getEntries();
++    [MeasureAs=PerformanceTimeline, CallWith=ScriptState, ImplementedAs=getEntriesByTypeForBinding] PerformanceEntryList getEntriesByType(DOMString entryType);
++    [MeasureAs=PerformanceTimeline, CallWith=ScriptState, ImplementedAs=getEntriesByNameForBinding] PerformanceEntryList getEntriesByName(DOMString name, optional DOMString entryType);
+ 
+     // Resource Timing
+     // https://w3c.github.io/resource-timing/#extensions-performance-interface
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.cc b/third_party/blink/renderer/modules/battery/battery_manager.cc
+index a03e6c833ce58f9021292534e5cbe68374b3cfa3..72edd51596971cc1a47bc7f8938af90a5a0e0626 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -13,6 +13,7 @@
+ #include "third_party/blink/renderer/core/frame/navigator.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+ #include "third_party/blink/renderer/modules/battery/battery_dispatcher.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -47,6 +48,28 @@ ScriptPromise<BatteryManager> BatteryManager::getBattery(
+   return supplement->StartRequest(script_state);
+ }
+ 
++// static
++ScriptPromise<BatteryManager> BatteryManager::getBatteryForBinding(
++    ScriptState* script_state,
++    Navigator& navigator) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "navigator", "getBatteryOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return getBattery(script_state, navigator);
++}
++
+ BatteryManager::~BatteryManager() = default;
+ 
+ BatteryManager::BatteryManager(Navigator& navigator)
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.h b/third_party/blink/renderer/modules/battery/battery_manager.h
+index 7f7c3e3a64bc5d861d083e017c096dd32c128ebe..d922d4bafd76d6b2d269343ad0f7fb209cc9c3e6 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.h
++++ b/third_party/blink/renderer/modules/battery/battery_manager.h
+@@ -27,6 +27,8 @@ class BatteryManager final : public EventTarget,
+ 
+  public:
+   static ScriptPromise<BatteryManager> getBattery(ScriptState*, Navigator&);
++  static ScriptPromise<BatteryManager> getBatteryForBinding(ScriptState*,
++                                                            Navigator&);
+   explicit BatteryManager(Navigator&);
+   ~BatteryManager() override;
+ 
+diff --git a/third_party/blink/renderer/modules/battery/navigator_battery.idl b/third_party/blink/renderer/modules/battery/navigator_battery.idl
+index 4e4922a64ec9184cf86138de9e1359cd1e68e161..fa86526372e92130e160909e3dad87524c2bd98e 100644
+--- a/third_party/blink/renderer/modules/battery/navigator_battery.idl
++++ b/third_party/blink/renderer/modules/battery/navigator_battery.idl
+@@ -5,5 +5,5 @@
+ // https://w3c.github.io/battery/#the-navigator-interface
+ [SecureContext, ImplementedAs=BatteryManager]
+ partial interface Navigator {
+-    [CallWith=ScriptState, MeasureAs=BatteryStatusGetBattery] Promise<BatteryManager> getBattery();
++    [CallWith=ScriptState, MeasureAs=BatteryStatusGetBattery, ImplementedAs=getBatteryForBinding] Promise<BatteryManager> getBattery();
+ };
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 1356ea4d78a68062acbbc40e07211f54fae29d55..d49b80df0c8730ea01c45aab32919eb8b537e127 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -100,6 +100,34 @@ V8ConnectionType NetworkInformation::type() const {
+   return V8ConnectionType(ConnectionTypeToEnum(type_));
+ }
+ 
++V8ConnectionType NetworkInformation::typeForBinding(
++    ScriptState* script_state) const {
++  V8ConnectionType result = type();
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "networkInformation", "typeOverride");
++  if (override_fn.IsEmpty())
++    return result;
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      V8String(isolate, result.AsString())};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!override_fn->Call(context, v8::Undefined(isolate), 1, argv)
++           .ToLocal(&override_result))
++    return result;
++  if (override_result->IsString()) {
++    auto overridden = V8ConnectionType::Create(
++        ToCoreString(isolate, override_result.As<v8::String>()));
++    if (overridden.has_value())
++      return overridden.value();
++  }
++  return result;
++}
++
+ double NetworkInformation::downlinkMax() const {
+   if (RuntimeEnabledFeatures::NetInfoConstantTypeEnabled()) {
+     return std::numeric_limits<double>::infinity();
+@@ -132,6 +160,34 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+       EffectiveConnectionTypeToEnum(effective_type_));
+ }
+ 
++V8EffectiveConnectionType NetworkInformation::effectiveTypeForBinding(
++    ScriptState* script_state) {
++  V8EffectiveConnectionType result = effectiveType();
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "networkInformation", "effectiveTypeOverride");
++  if (override_fn.IsEmpty())
++    return result;
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      V8String(isolate, result.AsString())};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!override_fn->Call(context, v8::Undefined(isolate), 1, argv)
++           .ToLocal(&override_result))
++    return result;
++  if (override_result->IsString()) {
++    auto overridden = V8EffectiveConnectionType::Create(
++        ToCoreString(isolate, override_result.As<v8::String>()));
++    if (overridden.has_value())
++      return overridden.value();
++  }
++  return result;
++}
++
+ namespace {
+ double MaybeDoubleOverride(ScriptState* script_state,
+                            double value,
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.h b/third_party/blink/renderer/modules/netinfo/network_information.h
+index a6570260f458d36bb3ece36cc7ffa06d9bd3e0b5..0337c90736e409f6823e422580f83c4f31755a24 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.h
++++ b/third_party/blink/renderer/modules/netinfo/network_information.h
+@@ -36,8 +36,10 @@ class NetworkInformation final
+   ~NetworkInformation() override;
+ 
+   V8ConnectionType type() const;
++  V8ConnectionType typeForBinding(ScriptState*) const;
+   double downlinkMax() const;
+   V8EffectiveConnectionType effectiveType();
++  V8EffectiveConnectionType effectiveTypeForBinding(ScriptState*);
+   uint32_t rtt();
+   uint32_t rttForBinding(ScriptState*);
+   double downlink();
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.idl b/third_party/blink/renderer/modules/netinfo/network_information.idl
+index d6a7f75bac8a2623f5f9d9085e06a9b1a5d35388..e27b7294814b1f76162f14fc8052e7b07942b82b 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.idl
++++ b/third_party/blink/renderer/modules/netinfo/network_information.idl
+@@ -29,11 +29,11 @@ typedef unsigned long long Milliseconds;
+     ActiveScriptWrappable,
+     Exposed=(Window,Worker)
+ ] interface NetworkInformation : EventTarget {
+-    [RuntimeEnabled=NetInfoDownlinkMax, MeasureAs=NetInfoType] readonly attribute ConnectionType type;
++    [RuntimeEnabled=NetInfoDownlinkMax, MeasureAs=NetInfoType, CallWith=ScriptState, ImplementedAs=typeForBinding] readonly attribute ConnectionType type;
+     [RuntimeEnabled=NetInfoDownlinkMax, MeasureAs=NetInfoDownlinkMax] readonly attribute Megabit downlinkMax;
+     [MeasureAs=NetInfoOnChange] attribute EventHandler onchange;
+     [RuntimeEnabled=NetInfoDownlinkMax, MeasureAs=NetInfoOnTypeChange] attribute EventHandler ontypechange;
+-    [MeasureAs=NetInfoEffectiveType] readonly attribute EffectiveConnectionType effectiveType;
++    [MeasureAs=NetInfoEffectiveType, CallWith=ScriptState, ImplementedAs=effectiveTypeForBinding] readonly attribute EffectiveConnectionType effectiveType;
+     [MeasureAs=NetInfoRtt, CallWith=ScriptState, ImplementedAs=rttForBinding] readonly attribute Milliseconds rtt;
+     [MeasureAs=NetInfoDownlink, CallWith=ScriptState, ImplementedAs=downlinkForBinding] readonly attribute Megabit downlink;
+     [MeasureAs=NetInfoSaveData, CallWith=ScriptState, ImplementedAs=saveDataForBinding] readonly attribute boolean saveData;
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+index c0d11111c0a5f0ebe1792efb22686d2392543ec0..552e5dd036ee5b12c299d1022389237ca8eac8a1 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.cc
+@@ -93,6 +93,34 @@ V8OrientationType ScreenOrientation::type() const {
+   return V8OrientationType(OrientationTypeToV8Enum(type_));
+ }
+ 
++V8OrientationType ScreenOrientation::typeForBinding(
++    ScriptState* script_state) const {
++  V8OrientationType result = type();
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "screenOrientation", "typeOverride");
++  if (override_fn.IsEmpty())
++    return result;
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      V8String(isolate, result.AsString())};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!override_fn->Call(context, v8::Undefined(isolate), 1, argv)
++           .ToLocal(&override_result))
++    return result;
++  if (override_result->IsString()) {
++    auto overridden = V8OrientationType::Create(
++        ToCoreString(isolate, override_result.As<v8::String>()));
++    if (overridden.has_value())
++      return overridden.value();
++  }
++  return result;
++}
++
+ uint16_t ScreenOrientation::angle() const {
+   return angle_;
+ }
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
+index 092bb2bbb76dc6520bf741f1b4f8cd3d6ba80f85..c0c4555eb521434e5ca9eeb16b3a53b9f7b7ff63 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.h
+@@ -40,6 +40,7 @@ class MODULES_EXPORT ScreenOrientation final : public EventTarget,
+   ExecutionContext* GetExecutionContext() const override;
+ 
+   V8OrientationType type() const;
++  V8OrientationType typeForBinding(ScriptState*) const;
+   uint16_t angle() const;
+   uint16_t angleForBinding(ScriptState*) const;
+ 
+diff --git a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
+index 97daafeb764cefdac2f6074e913f91db833891e4..e879d082658a16016c5b700117efaa7836594194 100644
+--- a/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
++++ b/third_party/blink/renderer/modules/screen_orientation/screen_orientation.idl
+@@ -25,7 +25,7 @@ enum OrientationType {
+ [Exposed=Window]
+ interface ScreenOrientation : EventTarget {
+     [MeasureAs=ScreenOrientationAngle, CallWith=ScriptState, ImplementedAs=angleForBinding] readonly attribute unsigned short angle;
+-    [MeasureAs=ScreenOrientationType] readonly attribute OrientationType type;
++    [MeasureAs=ScreenOrientationType, CallWith=ScriptState, ImplementedAs=typeForBinding] readonly attribute OrientationType type;
+ 
+     [CallWith=ScriptState, MeasureAs=ScreenOrientationLock, RaisesException] Promise<undefined> lock(OrientationLockType orientation);
+     [MeasureAs=ScreenOrientationUnlock] void unlock();
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+index 496ea6216fb8311d708f1498e44e5d3e27a16295..1eb0c57a1baf3085e516bff0b7a1878e8290ca8b 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -31,6 +31,7 @@
+ #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/platform/platform.h"
++#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_speech_synthesis_error_event_init.h"
+ #include "third_party/blink/renderer/bindings/modules/v8/v8_speech_synthesis_event_init.h"
+ #include "third_party/blink/renderer/core/dom/document.h"
+@@ -100,6 +101,30 @@ const HeapVector<Member<SpeechSynthesisVoice>>& SpeechSynthesis::getVoices() {
+   return voice_list_;
+ }
+ 
++HeapVector<Member<SpeechSynthesisVoice>> SpeechSynthesis::getVoicesForBinding(
++    ScriptState* script_state) {
++  HeapVector<Member<SpeechSynthesisVoice>> result(getVoices());
++  if (!script_state || !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "speechSynthesis", "getVoicesOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<IDLSequence<SpeechSynthesisVoice>>::ToV8(script_state,
++                                                            result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ bool SpeechSynthesis::Speaking() const {
+   // If we have a current speech utterance, then that means we're assumed to be
+   // in a speaking state. This state is independent of whether the utterance
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.h b/third_party/blink/renderer/modules/speech/speech_synthesis.h
+index 1683dc8faf45fc5d8b73d9fdbe3dd848e86c3d88..c7a6422e8da3d5272fec89b54f8df64679d250e7 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.h
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.h
+@@ -78,6 +78,7 @@ class MODULES_EXPORT SpeechSynthesis final
+   void resume() { Resume(); }
+ 
+   const HeapVector<Member<SpeechSynthesisVoice>>& getVoices();
++  HeapVector<Member<SpeechSynthesisVoice>> getVoicesForBinding(ScriptState*);
+ 
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(voiceschanged, kVoiceschanged)
+ 
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.idl b/third_party/blink/renderer/modules/speech/speech_synthesis.idl
+index ae5c66bfc5abff9e0cab0e40fc6570cd654b1f52..14a0d402769b6687a67995f8b4c70fa71551159e 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.idl
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.idl
+@@ -37,7 +37,7 @@
+     void cancel();
+     void pause();
+     void resume();
+-    sequence<SpeechSynthesisVoice> getVoices();
++    [CallWith=ScriptState, ImplementedAs=getVoicesForBinding] sequence<SpeechSynthesisVoice> getVoices();
+ 
+     attribute EventHandler onvoiceschanged;
+ };
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 7626d05a462de8f7f4cdff7a0652f9126ddf1492..41858352d9f96694f468a73ab565e489f1d8be27 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4409,6 +4409,32 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+   return result;
+ }
+ 
++std::optional<Vector<String>>
++WebGLRenderingContextBase::getSupportedExtensionsForBinding(
++    ScriptState* script_state) {
++  std::optional<Vector<String>> result = getSupportedExtensions();
++  if (!result.has_value() || !script_state ||
++      !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "webgl", "getSupportedExtensionsOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<IDLNullable<IDLSequence<IDLString>>>::ToV8(script_state,
++                                                              result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ ScriptValue WebGLRenderingContextBase::getTexParameter(
+     ScriptState* script_state,
+     GLenum target,
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+index 2d4dd0ac92702af4364a087ba20d8889eb1d613a..7a805ea02e54df77b8010a50c87d41b65c97a920 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -322,6 +322,7 @@ class MODULES_EXPORT WebGLRenderingContextBase
+       GLenum precision_type);
+   String getShaderSource(WebGLShader*);
+   std::optional<Vector<String>> getSupportedExtensions();
++  std::optional<Vector<String>> getSupportedExtensionsForBinding(ScriptState*);
+   virtual ScriptValue getTexParameter(ScriptState*,
+                                       GLenum target,
+                                       GLenum pname);
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
+index 6d9e83ff63ac02dead29a5fe32cad215598b2f95..58b20e7bbb9fd48a746a7667529a300307246919 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
+@@ -571,7 +571,7 @@ interface mixin WebGLRenderingContextBase {
+ 
+     DOMString?   getShaderSource(WebGLShader shader);
+ 
+-    [Measure] sequence<DOMString>? getSupportedExtensions();
++    [Measure, CallWith=ScriptState, ImplementedAs=getSupportedExtensionsForBinding] sequence<DOMString>? getSupportedExtensions();
+ 
+     [CallWith=ScriptState] any getTexParameter(GLenum target, GLenum pname);
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+index 1ca365a727e584b73f028fa5970d782a1f13cfb9..1ad6328ad0b7f263367379877ff3ccb32669915e 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+@@ -1328,6 +1328,32 @@ WebGLRenderingContextWebGPUBase::getSupportedExtensions() {
+   return {};
+ }
+ 
++std::optional<Vector<String>>
++WebGLRenderingContextWebGPUBase::getSupportedExtensionsForBinding(
++    ScriptState* script_state) {
++  std::optional<Vector<String>> result = getSupportedExtensions();
++  if (!result.has_value() || !script_state ||
++      !script_state->ContextIsValid())
++    return result;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++      script_state, "webgl", "getSupportedExtensionsOverride");
++  if (!override_fn.IsEmpty()) {
++    v8::Local<v8::Value> v8_value =
++        ToV8Traits<IDLNullable<IDLSequence<IDLString>>>::ToV8(script_state,
++                                                              result);
++    v8::Local<v8::Value> args[] = {v8_value};
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> override_result;
++    if (override_fn
++            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++            .ToLocal(&override_result)) {
++    }
++  }
++  return result;
++}
++
+ ScriptValue WebGLRenderingContextWebGPUBase::getTexParameter(ScriptState*,
+                                                              GLenum target,
+                                                              GLenum pname) {
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
+index 3139b7aa41ee240e4153748037cae51abdd04ec0..a4074e8a381abab5060994cd59816bed6f246138 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
+@@ -236,6 +236,7 @@ class MODULES_EXPORT WebGLRenderingContextWebGPUBase
+   ScriptValue getParameterForBinding(ScriptState*, GLenum pname);
+   WebGLShaderPrecisionFormat* getShaderPrecisionFormatForBinding(
+       ScriptState*, GLenum shader_type, GLenum precision_type);
++  std::optional<Vector<String>> getSupportedExtensionsForBinding(ScriptState*);
+ 
+   void hint(GLenum target, GLenum mode);
+   bool isBuffer(WebGLBuffer*);
