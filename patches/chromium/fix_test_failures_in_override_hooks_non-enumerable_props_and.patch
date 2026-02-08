@@ -1,0 +1,70 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 02:25:44 +0530
+Subject: Fix test failures in override hooks: non-enumerable props and
+ FontFaceSet
+
+WrapConstructorOnGlobal: Change GetOwnPropertyNames to use SKIP_SYMBOLS
+filter (without ONLY_ENUMERABLE) so that non-enumerable V8 built-in static
+methods like Date.now, Date.parse, Date.UTC, and Error.captureStackTrace
+are properly copied from the original constructor to the wrapper function.
+
+FontFaceSet.prototype.size: FontFaceSet uses [LegacyNoInterfaceObject] in
+its IDL, meaning there is no window.FontFaceSet constructor to look up.
+Access the prototype via document.fonts.__proto__ (GetPrototypeV2) instead.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 4edf52d2905def6ea14ee0b2195381ae208f8b76..318cf2d982091aef1caaf0cb57fbe7dc8a9bc3eb 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -355,7 +355,13 @@ bool WrapConstructorOnGlobal(v8::Isolate* isolate,
+       V8AtomicString(isolate, "caller"),
+   };
+   v8::Local<v8::Array> prop_names;
+-  if (original_fn->GetOwnPropertyNames(context).ToLocal(&prop_names)) {
++  // Use SKIP_SYMBOLS (not the default ONLY_ENUMERABLE | SKIP_SYMBOLS) so that
++  // non-enumerable static methods like Date.now, Error.captureStackTrace are
++  // also copied to the wrapper.
++  if (original_fn
++          ->GetOwnPropertyNames(
++              context, static_cast<v8::PropertyFilter>(v8::SKIP_SYMBOLS))
++          .ToLocal(&prop_names)) {
+     for (uint32_t i = 0; i < prop_names->Length(); i++) {
+       v8::Local<v8::Value> key;
+       if (!prop_names->Get(context, i).ToLocal(&key))
+@@ -1179,18 +1185,24 @@ void InstallBatch20Overrides(v8::Isolate* isolate,
+   }
+ 
+   // 6. FontFaceSet.prototype.size getter (wrap existing accessor).
++  // FontFaceSet has [LegacyNoInterfaceObject] — no global constructor.
++  // Access prototype via document.fonts.__proto__ instead.
+   {
+-    v8::Local<v8::Value> ffs_val;
+-    if (global->Get(context, V8AtomicString(isolate, "FontFaceSet"))
+-            .ToLocal(&ffs_val) &&
+-        ffs_val->IsFunction()) {
+-      v8::Local<v8::Value> proto_val;
+-      if (ffs_val.As<v8::Object>()
+-              ->Get(context, V8AtomicString(isolate, "prototype"))
+-              .ToLocal(&proto_val) &&
+-          proto_val->IsObject()) {
+-        WrapGetterOnPrototype(isolate, context, proto_val.As<v8::Object>(),
+-                               "size", "fontFaceSet", "sizeOverride");
++    v8::Local<v8::Value> doc_val;
++    if (global->Get(context, V8AtomicString(isolate, "document"))
++            .ToLocal(&doc_val) &&
++        doc_val->IsObject()) {
++      v8::Local<v8::Value> fonts_val;
++      if (doc_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "fonts"))
++              .ToLocal(&fonts_val) &&
++          fonts_val->IsObject()) {
++        v8::Local<v8::Value> proto_val =
++            fonts_val.As<v8::Object>()->GetPrototypeV2();
++        if (proto_val->IsObject()) {
++          WrapGetterOnPrototype(isolate, context, proto_val.As<v8::Object>(),
++                                 "size", "fontFaceSet", "sizeOverride");
++        }
+       }
+     }
+   }
