@@ -1,0 +1,296 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 01:32:09 +0530
+Subject: Add addEventListener interception, property existence spoofing,
+ window.doNotTrack, postMessage wrappers (Batch 19: 44 APIs)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Pattern W — EventTarget.addEventListener interception:
+- Modified AddEventListenerInternal() in event_target.cc to check
+  window.customOverrides.eventTarget.addEventListenerOverride
+- Override receives (eventType) string, returns false to block registration
+- Covers 27 event types: device sensors (devicemotion, deviceorientation,
+  deviceorientationabsolute, devicelight, deviceproximity, userproximity),
+  touch events (touchstart, touchend, touchmove, touchcancel), pointer events
+  (pointerdown, pointerup, pointermove, pointerover, pointerout, pointerenter,
+  pointerleave), autocomplete events (webkitAutofill, onautocomplete,
+  autocomplete), document/media events (visibilitychange, voiceschanged,
+  icecandidate), FontFaceSet events (loading, loadingdone, loadingerror)
+- Zero overhead when no override is set (fast property lookup returns undefined)
+- Only intercepts in main world via DynamicTo<LocalDOMWindow> +
+  ToScriptStateForMainWorld guard
+
+Pattern Y — Property existence spoofing:
+- Added InstallPropertyExistenceOverrides() in v8_builtin_overrides.cc
+- Reads window.customOverrides.propertyExistence at context creation
+- Deletes properties from Navigator.prototype (bluetooth, usb, hid, serial,
+  keyboard, xr, presentation, credentials), window globals (OrientationSensor,
+  ProximitySensor, DocumentTouch, ApplePaySession), and Document.prototype
+- 12 properties covered
+
+window.doNotTrack (Pattern A — String return):
+- Added [CallWith=ScriptState, ImplementedAs=doNotTrackForBinding] to window.idl
+- Delegates to GetFrame()->Client()->DoNotTrackValue() same as navigator.doNotTrack
+- Override at window.customOverrides.window.doNotTrackOverride
+
+postMessage wrappers (Pattern V — V8 built-in wrapping):
+- Added InstallPostMessageOverrides() in v8_builtin_overrides.cc
+- Wraps Worker.prototype.postMessage, BroadcastChannel.prototype.postMessage,
+  and MessagePort.prototype.postMessage (covers SharedWorker.port and
+  MessageChannel.port1/port2)
+- Override signature: (result, ...args) => newResult
+
+Files modified:
+- core/dom/events/event_target.cc (Pattern W + includes)
+- bindings/core/v8/v8_builtin_overrides.cc (Pattern Y + postMessage)
+- core/frame/window.idl (window.doNotTrack attribute)
+- core/frame/local_dom_window.h (doNotTrackForBinding declaration)
+- core/frame/local_dom_window.cc (doNotTrackForBinding implementation)
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index ecbb46a50a286273093d4db682625036e5138ba0..110f5d26df1368cb52578d64a8d2a377bb3d4680 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -677,6 +677,115 @@ void InstallIntersectionObserverOverrides(v8::Isolate* isolate,
+   }
+ }
+ 
++// Pattern Y: Property existence spoofing.
++// Reads window.customOverrides.propertyExistence and deletes properties from
++// window (globals) and Navigator.prototype based on arrays in that object.
++static void InstallPropertyExistenceOverrides(v8::Isolate* isolate,
++                                               v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++
++  v8::Local<v8::Value> co_val;
++  if (!global->Get(context, V8AtomicString(isolate, "customOverrides"))
++           .ToLocal(&co_val) ||
++      !co_val->IsObject()) {
++    return;
++  }
++
++  v8::Local<v8::Value> pe_val;
++  if (!co_val.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, "propertyExistence"))
++           .ToLocal(&pe_val) ||
++      !pe_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Object> pe = pe_val.As<v8::Object>();
++
++  auto delete_from_array = [&](v8::Local<v8::Object> target,
++                                const char* array_key) {
++    v8::Local<v8::Value> arr_val;
++    if (!pe->Get(context, V8AtomicString(isolate, array_key))
++             .ToLocal(&arr_val) ||
++        !arr_val->IsArray()) {
++      return;
++    }
++    v8::Local<v8::Array> arr = arr_val.As<v8::Array>();
++    for (uint32_t i = 0; i < arr->Length(); i++) {
++      v8::Local<v8::Value> name_val;
++      if (arr->Get(context, i).ToLocal(&name_val) && name_val->IsString()) {
++        std::ignore = target->Delete(context, name_val.As<v8::String>());
++      }
++    }
++  };
++
++  // Delete window globals (constructors like OrientationSensor, etc.)
++  delete_from_array(global, "window");
++
++  // Delete Navigator.prototype properties (bluetooth, usb, hid, etc.)
++  v8::Local<v8::Value> nav_ctor_val;
++  if (global->Get(context, V8AtomicString(isolate, "Navigator"))
++          .ToLocal(&nav_ctor_val) &&
++      nav_ctor_val->IsFunction()) {
++    v8::Local<v8::Value> nav_proto_val;
++    if (nav_ctor_val.As<v8::Function>()
++            ->Get(context, V8AtomicString(isolate, "prototype"))
++            .ToLocal(&nav_proto_val) &&
++        nav_proto_val->IsObject()) {
++      delete_from_array(nav_proto_val.As<v8::Object>(), "navigator");
++    }
++  }
++
++  // Delete Document.prototype properties if specified
++  v8::Local<v8::Value> doc_ctor_val;
++  if (global->Get(context, V8AtomicString(isolate, "Document"))
++          .ToLocal(&doc_ctor_val) &&
++      doc_ctor_val->IsFunction()) {
++    v8::Local<v8::Value> doc_proto_val;
++    if (doc_ctor_val.As<v8::Function>()
++            ->Get(context, V8AtomicString(isolate, "prototype"))
++            .ToLocal(&doc_proto_val) &&
++        doc_proto_val->IsObject()) {
++      delete_from_array(doc_proto_val.As<v8::Object>(), "document");
++    }
++  }
++}
++
++// PostMessage wrappers: wrap postMessage on Worker.prototype,
++// BroadcastChannel.prototype, and MessagePort.prototype (covers
++// SharedWorker.port and MessageChannel.port1/port2).
++static void InstallPostMessageOverrides(v8::Isolate* isolate,
++                                         v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++
++  struct ProtoWrap {
++    const char* ctor_name;
++    const char* interface_key;
++    const char* override_name;
++  };
++  static constexpr ProtoWrap kWraps[] = {
++      {"Worker", "window", "workerPostMessageOverride"},
++      {"BroadcastChannel", "window", "broadcastChannelPostMessageOverride"},
++      {"MessagePort", "window", "messagePortPostMessageOverride"},
++  };
++
++  for (const auto& w : kWraps) {
++    v8::Local<v8::Value> ctor_val;
++    if (!global->Get(context, V8AtomicString(isolate, w.ctor_name))
++             .ToLocal(&ctor_val) ||
++        !ctor_val->IsFunction()) {
++      continue;
++    }
++    v8::Local<v8::Value> proto_val;
++    if (!ctor_val.As<v8::Function>()
++             ->Get(context, V8AtomicString(isolate, "prototype"))
++             .ToLocal(&proto_val) ||
++        !proto_val->IsObject()) {
++      continue;
++    }
++    WrapFunctionOnObject(isolate, context, proto_val.As<v8::Object>(),
++                         "postMessage", w.interface_key, w.override_name);
++  }
++}
++
+ }  // namespace
+ 
+ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+@@ -694,6 +803,8 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+   InstallWebAssemblyOverrides(isolate, context);
+   InstallSensorOverrides(isolate, context);
+   InstallIntersectionObserverOverrides(isolate, context);
++  InstallPostMessageOverrides(isolate, context);
++  InstallPropertyExistenceOverrides(isolate, context);
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/dom/events/event_target.cc b/third_party/blink/renderer/core/dom/events/event_target.cc
+index 8df5b5d536183e4c0ee35b4aba0c0cb4eaa99a57..4a19cd24090baede97302b039e4a8193d2a43426 100644
+--- a/third_party/blink/renderer/core/dom/events/event_target.cc
++++ b/third_party/blink/renderer/core/dom/events/event_target.cc
+@@ -66,7 +66,9 @@
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/core/scheduler/task_attribution_util.h"
+ #include "third_party/blink/renderer/core/workers/worker_or_worklet_global_scope.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_forbidden_scope.h"
+ #include "third_party/blink/renderer/platform/bindings/source_location.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_dom_activity_logger.h"
+@@ -596,6 +598,32 @@ bool EventTarget::AddEventListenerInternal(
+   if (!execution_context)
+     return false;
+ 
++  // Custom override: allow JS to intercept/block addEventListener by event type.
++  if (auto* window = DynamicTo<LocalDOMWindow>(execution_context)) {
++    if (LocalFrame* frame = window->GetFrame()) {
++      ScriptState* script_state = ToScriptStateForMainWorld(frame);
++      if (script_state && script_state->ContextIsValid()) {
++        v8::Isolate* isolate = script_state->GetIsolate();
++        v8::HandleScope handle_scope(isolate);
++        ScriptState::Scope scope(script_state);
++        v8::Local<v8::Function> override_fn =
++            GetCustomOverrideFunction(script_state, "eventTarget",
++                                      "addEventListenerOverride");
++        if (!override_fn.IsEmpty()) {
++          v8::Local<v8::Context> ctx = script_state->GetContext();
++          v8::Local<v8::Value> argv[] = {V8String(isolate, event_type)};
++          v8::TryCatch try_catch(isolate);
++          v8::Local<v8::Value> result;
++          if (override_fn->Call(ctx, ctx->Global(), 1, argv)
++                  .ToLocal(&result) &&
++              result->IsFalse()) {
++            return false;
++          }
++        }
++      }
++    }
++  }
++
+   // Unload/Beforeunload handlers are not allowed in fenced frames.
+   if (event_type == event_type_names::kUnload ||
+       event_type == event_type_names::kBeforeunload) {
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 92edce05f603e0fc1d731d52364c8382316af85e..f7122977e75a75707b40ddfc1f8dae98e83a3c87 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -1785,6 +1785,40 @@ double LocalDOMWindow::devicePixelRatioForBinding(
+                              "devicePixelRatioOverride");
+ }
+ 
++String LocalDOMWindow::doNotTrackForBinding(ScriptState* script_state) const {
++  String value;
++  if (GetFrame()) {
++    value = GetFrame()->Client()->DoNotTrackValue();
++  }
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "window", "doNotTrackOverride");
++  if (override_fn.IsEmpty())
++    return value;
++
++  v8::Local<v8::Context> context = script_state->GetContext();
++  v8::Local<v8::Value> argv[] = {
++      value.IsNull() ? v8::Local<v8::Value>(v8::Null(isolate))
++                     : v8::Local<v8::Value>(V8String(isolate, value))};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> result;
++  if (!override_fn->Call(context, context->Global(), 1, argv)
++           .ToLocal(&result))
++    return value;
++  if (result->IsNullOrUndefined())
++    return value;
++  v8::Local<v8::String> result_str;
++  if (!result->ToString(context).ToLocal(&result_str))
++    return value;
++  return ToCoreString(isolate, result_str);
++}
++
+ gfx::Size LocalDOMWindow::GetViewportSize() const {
+   LocalFrameView* view = GetFrame()->View();
+   if (!view)
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.h b/third_party/blink/renderer/core/frame/local_dom_window.h
+index bad8abc1f8cf940f5cce62b8bb01713d83a0c524..02c50c2f856bbac831596bf903f5285e74ee9c94 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.h
++++ b/third_party/blink/renderer/core/frame/local_dom_window.h
+@@ -362,6 +362,7 @@ class CORE_EXPORT LocalDOMWindow final : public DOMWindow,
+   // WebKit extensions
+   double devicePixelRatio() const;
+   double devicePixelRatioForBinding(ScriptState*) const;
++  String doNotTrackForBinding(ScriptState*) const;
+ 
+   // This is the interface orientation in degrees. Some examples are:
+   //  0 is straight up; -90 is when the device is rotated 90 clockwise;
+diff --git a/third_party/blink/renderer/core/frame/window.idl b/third_party/blink/renderer/core/frame/window.idl
+index 85aa14506567f609fe35a3e5e3327b2792940010..c5fb8cd1b5d347d903fb7c7b7c8643754e4df163 100644
+--- a/third_party/blink/renderer/core/frame/window.idl
++++ b/third_party/blink/renderer/core/frame/window.idl
+@@ -186,6 +186,7 @@
+     [Replaceable, GetterCallWith=ScriptState, MeasureAs=WindowEvent] readonly attribute any event;
+ 
+     // Non-standard APIs
++    [CallWith=ScriptState, ImplementedAs=doNotTrackForBinding] readonly attribute DOMString? doNotTrack;
+     [MeasureAs=WindowClientInformation, Replaceable] readonly attribute Navigator clientInformation;
+     [MeasureAs=WindowFind] boolean find(optional DOMString string = "",
+                                         optional boolean caseSensitive = false,
