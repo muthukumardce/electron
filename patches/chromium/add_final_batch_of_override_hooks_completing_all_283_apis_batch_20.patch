@@ -1,0 +1,627 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 01:58:26 +0530
+Subject: Add final batch of override hooks completing all 283 APIs (Batch 20:
+ 24 APIs)
+
+Introduces new override patterns in v8_builtin_overrides.cc:
+
+- OverridePropertyGetter: native data property getter that reads values
+  from customOverrides (used for Navigator.prototype.globalPrivacyControl,
+  mozConnection, webkitConnection, Error.prepareStackTrace, process.env.TZ)
+- GenericOverrideOnlyCallback: function callback with no original function,
+  delegates entirely to the override (used for Math.setSeed,
+  HTMLFormElement.prototype.requestAutocomplete)
+- WrapGetterOnPrototype: wraps an existing accessor getter via
+  Object.defineProperty (used for document.fonts.size,
+  speechSynthesis.onvoiceschanged, MediaQueryList.prototype.onchange,
+  OfflineAudioContext.prototype.oncomplete)
+
+Also wraps EventTarget.prototype.dispatchEvent (Pattern V),
+Error.captureStackTrace for stack modification, and creates
+window.mozRTCPeerConnection as a constructor alias (Pattern X).
+
+Extends Pattern Y property existence spoofing with:
+- Property addition via windowAdd/documentAdd/navigatorAdd arrays
+  (for ontouchstart, ondevicelight, ondeviceproximity, etc.)
+- Deletion from new prototype targets: SpeechSynthesis.prototype,
+  OfflineAudioContext.prototype, MediaQueryList.prototype,
+  HTMLFormElement.prototype
+
+Full API list:
+- EventTarget.prototype.dispatchEvent (Pattern V)
+- Navigator.prototype.globalPrivacyControl (accessor)
+- Navigator.prototype.mozConnection (accessor)
+- Navigator.prototype.webkitConnection (accessor)
+- Error.prepareStackTrace (accessor)
+- Error.prototype.stack via captureStackTrace (Pattern V)
+- document.featurePolicy.features (Pattern V)
+- document.fonts.size (getter wrap)
+- Math.setSeed (override-only function)
+- window.mozRTCPeerConnection (Pattern X alias)
+- HTMLFormElement.prototype.requestAutocomplete (override-only)
+- process.env.TZ (accessor)
+- speechSynthesis.onvoiceschanged (getter wrap)
+- MediaQueryList.prototype.onchange (getter wrap)
+- OfflineAudioContext.prototype.oncomplete (getter wrap)
+- 9 event handler on* properties via Pattern Y add/remove
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 110f5d26df1368cb52578d64a8d2a377bb3d4680..4edf52d2905def6ea14ee0b2195381ae208f8b76 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -747,6 +747,81 @@ static void InstallPropertyExistenceOverrides(v8::Isolate* isolate,
+       delete_from_array(doc_proto_val.As<v8::Object>(), "document");
+     }
+   }
++
++  // Batch 20: Delete from additional prototypes.
++  // Helper to get Ctor.prototype and delete properties from it.
++  auto delete_from_prototype = [&](const char* ctor_name,
++                                    const char* array_key) {
++    v8::Local<v8::Value> ctor_val;
++    if (!global->Get(context, V8AtomicString(isolate, ctor_name))
++             .ToLocal(&ctor_val) ||
++        !ctor_val->IsFunction()) {
++      return;
++    }
++    v8::Local<v8::Value> proto_val;
++    if (!ctor_val.As<v8::Function>()
++             ->Get(context, V8AtomicString(isolate, "prototype"))
++             .ToLocal(&proto_val) ||
++        !proto_val->IsObject()) {
++      return;
++    }
++    delete_from_array(proto_val.As<v8::Object>(), array_key);
++  };
++
++  // SpeechSynthesis.prototype (onvoiceschanged)
++  delete_from_prototype("SpeechSynthesis", "speechSynthesis");
++  // OfflineAudioContext.prototype (oncomplete)
++  delete_from_prototype("OfflineAudioContext", "offlineAudioContext");
++  // MediaQueryList.prototype (onchange)
++  delete_from_prototype("MediaQueryList", "mediaQueryList");
++  // HTMLFormElement.prototype (requestAutocomplete)
++  delete_from_prototype("HTMLFormElement", "htmlFormElement");
++
++  // Batch 20: Add null-valued event handler properties (for existence
++  // spoofing). Reads arrays like "windowAdd", "documentAdd" from
++  // propertyExistence and defines null properties on the target.
++  auto add_null_properties = [&](v8::Local<v8::Object> target,
++                                  const char* array_key) {
++    v8::Local<v8::Value> arr_val;
++    if (!pe->Get(context, V8AtomicString(isolate, array_key))
++             .ToLocal(&arr_val) ||
++        !arr_val->IsArray()) {
++      return;
++    }
++    v8::Local<v8::Array> arr = arr_val.As<v8::Array>();
++    for (uint32_t i = 0; i < arr->Length(); i++) {
++      v8::Local<v8::Value> name_val;
++      if (arr->Get(context, i).ToLocal(&name_val) && name_val->IsString()) {
++        std::ignore = target->DefineOwnProperty(
++            context, name_val.As<v8::String>(), v8::Null(isolate), v8::None);
++      }
++    }
++  };
++
++  // Add event handler properties to window (ontouchstart, ondevicelight, etc.)
++  add_null_properties(global, "windowAdd");
++
++  // Add event handler properties to Document.prototype
++  if (doc_ctor_val->IsFunction()) {
++    v8::Local<v8::Value> doc_proto_val2;
++    if (doc_ctor_val.As<v8::Function>()
++            ->Get(context, V8AtomicString(isolate, "prototype"))
++            .ToLocal(&doc_proto_val2) &&
++        doc_proto_val2->IsObject()) {
++      add_null_properties(doc_proto_val2.As<v8::Object>(), "documentAdd");
++    }
++  }
++
++  // Add properties to Navigator.prototype
++  if (nav_ctor_val->IsFunction()) {
++    v8::Local<v8::Value> nav_proto_val2;
++    if (nav_ctor_val.As<v8::Function>()
++            ->Get(context, V8AtomicString(isolate, "prototype"))
++            .ToLocal(&nav_proto_val2) &&
++        nav_proto_val2->IsObject()) {
++      add_null_properties(nav_proto_val2.As<v8::Object>(), "navigatorAdd");
++    }
++  }
+ }
+ 
+ // PostMessage wrappers: wrap postMessage on Worker.prototype,
+@@ -786,6 +861,484 @@ static void InstallPostMessageOverrides(v8::Isolate* isolate,
+   }
+ }
+ 
++// Batch 20: Override property getter callback.
++// Used for adding new properties whose values come from customOverrides.
++// data array: [interface_key_string, override_name_string]
++void OverridePropertyGetter(v8::Local<v8::Name> property,
++                             const v8::PropertyCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++  v8::Local<v8::Object> global = context->Global();
++
++  v8::Local<v8::Array> data = info.Data().As<v8::Array>();
++  v8::Local<v8::String> iface_key =
++      data->Get(context, 0u).ToLocalChecked().As<v8::String>();
++  v8::Local<v8::String> override_name =
++      data->Get(context, 1u).ToLocalChecked().As<v8::String>();
++
++  v8::Local<v8::Value> co_val;
++  if (!global
++           ->Get(context, V8AtomicString(isolate, "customOverrides"))
++           .ToLocal(&co_val) ||
++      !co_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Value> iface_val;
++  if (!co_val.As<v8::Object>()
++           ->Get(context, iface_key)
++           .ToLocal(&iface_val) ||
++      !iface_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Value> override_val;
++  if (!iface_val.As<v8::Object>()
++           ->Get(context, override_name)
++           .ToLocal(&override_val) ||
++      override_val->IsUndefined()) {
++    return;
++  }
++
++  if (override_val->IsFunction()) {
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> result;
++    if (override_val.As<v8::Function>()
++            ->Call(context, v8::Undefined(isolate), 0, nullptr)
++            .ToLocal(&result) &&
++        !result->IsUndefined()) {
++      info.GetReturnValue().Set(result);
++    }
++  } else {
++    info.GetReturnValue().Set(override_val);
++  }
++}
++
++// Installs a native data property backed by an override getter.
++bool InstallOverrideProperty(v8::Isolate* isolate,
++                              v8::Local<v8::Context> context,
++                              v8::Local<v8::Object> target,
++                              const char* prop_name,
++                              const char* interface_key,
++                              const char* override_name) {
++  v8::Local<v8::Value> data_items[] = {
++      V8AtomicString(isolate, interface_key),
++      V8AtomicString(isolate, override_name),
++  };
++  v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 2);
++  return target
++      ->SetNativeDataProperty(context, V8AtomicString(isolate, prop_name),
++                               OverridePropertyGetter, nullptr, data,
++                               v8::None)
++      .FromMaybe(false);
++}
++
++// Generic callback for functions that have no original — delegates entirely
++// to the override. data: [interface_key, override_name]
++void GenericOverrideOnlyCallback(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++  v8::Local<v8::Object> global = context->Global();
++
++  v8::Local<v8::Array> data = info.Data().As<v8::Array>();
++  v8::Local<v8::String> iface_key =
++      data->Get(context, 0u).ToLocalChecked().As<v8::String>();
++  v8::Local<v8::String> override_name =
++      data->Get(context, 1u).ToLocalChecked().As<v8::String>();
++
++  v8::Local<v8::Value> co_val;
++  if (!global
++           ->Get(context, V8AtomicString(isolate, "customOverrides"))
++           .ToLocal(&co_val) ||
++      !co_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Value> iface_val;
++  if (!co_val.As<v8::Object>()
++           ->Get(context, iface_key)
++           .ToLocal(&iface_val) ||
++      !iface_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Value> override_fn_val;
++  if (!iface_val.As<v8::Object>()
++           ->Get(context, override_name)
++           .ToLocal(&override_fn_val) ||
++      !override_fn_val->IsFunction()) {
++    return;
++  }
++
++  int argc = info.Length();
++  std::vector<v8::Local<v8::Value>> argv(argc);
++  for (int i = 0; i < argc; i++) {
++    argv[i] = info[i];
++  }
++
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> result;
++  if (override_fn_val.As<v8::Function>()
++          ->Call(context, v8::Undefined(isolate), argc, argv.data())
++          .ToLocal(&result)) {
++    info.GetReturnValue().Set(result);
++  }
++}
++
++// Installs a function on target that delegates entirely to override.
++bool InstallOverrideFunction(v8::Isolate* isolate,
++                              v8::Local<v8::Context> context,
++                              v8::Local<v8::Object> target,
++                              const char* fn_name,
++                              const char* interface_key,
++                              const char* override_name,
++                              int length = 0) {
++  v8::Local<v8::Value> data_items[] = {
++      V8AtomicString(isolate, interface_key),
++      V8AtomicString(isolate, override_name),
++  };
++  v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 2);
++  v8::Local<v8::Function> fn;
++  if (!v8::Function::New(context, GenericOverrideOnlyCallback, data, length)
++           .ToLocal(&fn)) {
++    return false;
++  }
++  fn->SetName(V8AtomicString(isolate, fn_name));
++  return target->Set(context, V8AtomicString(isolate, fn_name), fn)
++      .FromMaybe(false);
++}
++
++// Wraps an existing getter (accessor property) on a prototype with override
++// logic. Uses Object.defineProperty to redefine the accessor.
++bool WrapGetterOnPrototype(v8::Isolate* isolate,
++                            v8::Local<v8::Context> context,
++                            v8::Local<v8::Object> proto,
++                            const char* prop_name,
++                            const char* interface_key,
++                            const char* override_name) {
++  v8::Local<v8::String> name_str = V8AtomicString(isolate, prop_name);
++  v8::Local<v8::Object> global = context->Global();
++
++  // Get existing property descriptor to extract the getter.
++  v8::Local<v8::Value> desc_val;
++  if (!proto->GetOwnPropertyDescriptor(context, name_str).ToLocal(&desc_val) ||
++      !desc_val->IsObject()) {
++    return false;
++  }
++  v8::Local<v8::Object> desc = desc_val.As<v8::Object>();
++  v8::Local<v8::Value> getter_val;
++  if (!desc->Get(context, V8AtomicString(isolate, "get")).ToLocal(&getter_val) ||
++      !getter_val->IsFunction()) {
++    return false;
++  }
++  v8::Local<v8::Function> original_getter = getter_val.As<v8::Function>();
++
++  // Create wrapper using GenericBuiltinWrapper.
++  v8::Local<v8::Value> data_items[] = {
++      original_getter,
++      V8AtomicString(isolate, interface_key),
++      V8AtomicString(isolate, override_name),
++  };
++  v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 3);
++
++  v8::Local<v8::Function> wrapper;
++  if (!v8::Function::New(context, GenericBuiltinWrapper, data, 0)
++           .ToLocal(&wrapper)) {
++    return false;
++  }
++
++  // Get Object.defineProperty to redefine the accessor.
++  v8::Local<v8::Value> object_val;
++  if (!global->Get(context, V8AtomicString(isolate, "Object"))
++           .ToLocal(&object_val) ||
++      !object_val->IsObject()) {
++    return false;
++  }
++  v8::Local<v8::Value> define_prop_val;
++  if (!object_val.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, "defineProperty"))
++           .ToLocal(&define_prop_val) ||
++      !define_prop_val->IsFunction()) {
++    return false;
++  }
++
++  // Build new descriptor { get: wrapper, set: originalSetter, enumerable,
++  // configurable }.
++  v8::Local<v8::Object> new_desc = v8::Object::New(isolate);
++  new_desc->Set(context, V8AtomicString(isolate, "get"), wrapper).Check();
++  v8::Local<v8::Value> setter_val;
++  if (desc->Get(context, V8AtomicString(isolate, "set")).ToLocal(&setter_val) &&
++      setter_val->IsFunction()) {
++    new_desc->Set(context, V8AtomicString(isolate, "set"), setter_val).Check();
++  }
++  new_desc
++      ->Set(context, V8AtomicString(isolate, "enumerable"), v8::True(isolate))
++      .Check();
++  new_desc
++      ->Set(context, V8AtomicString(isolate, "configurable"),
++            v8::True(isolate))
++      .Check();
++
++  // Call Object.defineProperty(proto, name, desc).
++  v8::Local<v8::Value> args[] = {proto, name_str, new_desc};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> result;
++  return define_prop_val.As<v8::Function>()
++      ->Call(context, object_val, 3, args)
++      .ToLocal(&result);
++}
++
++// Batch 20: Install remaining API overrides.
++void InstallBatch20Overrides(v8::Isolate* isolate,
++                              v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++
++  // 1. EventTarget.prototype.dispatchEvent (Pattern V).
++  {
++    v8::Local<v8::Value> et_val;
++    if (global
++            ->Get(context, V8AtomicString(isolate, "EventTarget"))
++            .ToLocal(&et_val) &&
++        et_val->IsFunction()) {
++      v8::Local<v8::Value> proto_val;
++      if (et_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "prototype"))
++              .ToLocal(&proto_val) &&
++          proto_val->IsObject()) {
++        WrapFunctionOnObject(isolate, context, proto_val.As<v8::Object>(),
++                              "dispatchEvent", "eventTarget",
++                              "dispatchEventOverride");
++      }
++    }
++  }
++
++  // 2. Navigator.prototype: globalPrivacyControl, mozConnection,
++  // webkitConnection.
++  {
++    v8::Local<v8::Value> nav_val;
++    if (global->Get(context, V8AtomicString(isolate, "Navigator"))
++            .ToLocal(&nav_val) &&
++        nav_val->IsFunction()) {
++      v8::Local<v8::Value> proto_val;
++      if (nav_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "prototype"))
++              .ToLocal(&proto_val) &&
++          proto_val->IsObject()) {
++        v8::Local<v8::Object> proto = proto_val.As<v8::Object>();
++        InstallOverrideProperty(isolate, context, proto,
++                                 "globalPrivacyControl", "navigator",
++                                 "globalPrivacyControlOverride");
++        InstallOverrideProperty(isolate, context, proto, "mozConnection",
++                                 "navigator", "mozConnectionOverride");
++        InstallOverrideProperty(isolate, context, proto, "webkitConnection",
++                                 "navigator", "webkitConnectionOverride");
++      }
++    }
++  }
++
++  // 3. Error.prepareStackTrace (accessor property on Error constructor).
++  {
++    v8::Local<v8::Value> error_val;
++    if (global->Get(context, V8AtomicString(isolate, "Error"))
++            .ToLocal(&error_val) &&
++        error_val->IsFunction()) {
++      InstallOverrideProperty(isolate, context, error_val.As<v8::Object>(),
++                               "prepareStackTrace", "error",
++                               "prepareStackTraceOverride");
++    }
++  }
++
++  // 4. Error.captureStackTrace wrapper (for Error.prototype.stack override).
++  {
++    v8::Local<v8::Value> error_val;
++    if (global->Get(context, V8AtomicString(isolate, "Error"))
++            .ToLocal(&error_val) &&
++        error_val->IsFunction()) {
++      WrapFunctionOnObject(isolate, context, error_val.As<v8::Object>(),
++                            "captureStackTrace", "error",
++                            "captureStackTraceOverride");
++    }
++  }
++
++  // 5. PermissionsPolicy/FeaturePolicy.prototype.features (Pattern V).
++  {
++    const char* policy_names[] = {"PermissionsPolicy", "FeaturePolicy"};
++    for (const char* ctor_name : policy_names) {
++      v8::Local<v8::Value> ctor_val;
++      if (global->Get(context, V8AtomicString(isolate, ctor_name))
++              .ToLocal(&ctor_val) &&
++          ctor_val->IsFunction()) {
++        v8::Local<v8::Value> proto_val;
++        if (ctor_val.As<v8::Object>()
++                ->Get(context, V8AtomicString(isolate, "prototype"))
++                .ToLocal(&proto_val) &&
++            proto_val->IsObject()) {
++          WrapFunctionOnObject(isolate, context, proto_val.As<v8::Object>(),
++                                "features", "document",
++                                "featurePolicyFeaturesOverride");
++        }
++      }
++    }
++  }
++
++  // 6. FontFaceSet.prototype.size getter (wrap existing accessor).
++  {
++    v8::Local<v8::Value> ffs_val;
++    if (global->Get(context, V8AtomicString(isolate, "FontFaceSet"))
++            .ToLocal(&ffs_val) &&
++        ffs_val->IsFunction()) {
++      v8::Local<v8::Value> proto_val;
++      if (ffs_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "prototype"))
++              .ToLocal(&proto_val) &&
++          proto_val->IsObject()) {
++        WrapGetterOnPrototype(isolate, context, proto_val.As<v8::Object>(),
++                               "size", "fontFaceSet", "sizeOverride");
++      }
++    }
++  }
++
++  // 7. Math.setSeed (new function, delegates to override).
++  {
++    v8::Local<v8::Value> math_val;
++    if (global->Get(context, V8AtomicString(isolate, "Math"))
++            .ToLocal(&math_val) &&
++        math_val->IsObject()) {
++      InstallOverrideFunction(isolate, context, math_val.As<v8::Object>(),
++                               "setSeed", "math", "setSeedOverride", 1);
++    }
++  }
++
++  // 8. window.mozRTCPeerConnection (constructor alias for RTCPeerConnection).
++  {
++    v8::Local<v8::Value> rtc_val;
++    if (global->Get(context, V8AtomicString(isolate, "RTCPeerConnection"))
++            .ToLocal(&rtc_val) &&
++        rtc_val->IsFunction()) {
++      v8::Local<v8::Value> data_items[] = {
++          rtc_val,
++          V8AtomicString(isolate, "rtcPeerConnection"),
++          V8AtomicString(isolate, "mozConstructorOverride"),
++      };
++      v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 3);
++
++      int fn_length = 0;
++      v8::Local<v8::Value> length_val;
++      if (rtc_val.As<v8::Function>()
++              ->Get(context, V8AtomicString(isolate, "length"))
++              .ToLocal(&length_val) &&
++          length_val->IsInt32()) {
++        fn_length = length_val.As<v8::Int32>()->Value();
++      }
++
++      v8::Local<v8::Function> wrapper;
++      if (v8::Function::New(context, GenericConstructorWrapper, data, fn_length)
++              .ToLocal(&wrapper)) {
++        v8::Local<v8::String> moz_name =
++            V8AtomicString(isolate, "mozRTCPeerConnection");
++        wrapper->SetName(moz_name);
++
++        // Share prototype so instanceof works.
++        v8::Local<v8::Value> proto;
++        if (rtc_val.As<v8::Function>()
++                ->Get(context, V8AtomicString(isolate, "prototype"))
++                .ToLocal(&proto)) {
++          wrapper->Set(context, V8AtomicString(isolate, "prototype"), proto)
++              .Check();
++        }
++        global->Set(context, moz_name, wrapper).FromMaybe(false);
++      }
++    }
++  }
++
++  // 9. HTMLFormElement.prototype.requestAutocomplete (new method).
++  {
++    v8::Local<v8::Value> hfe_val;
++    if (global->Get(context, V8AtomicString(isolate, "HTMLFormElement"))
++            .ToLocal(&hfe_val) &&
++        hfe_val->IsFunction()) {
++      v8::Local<v8::Value> proto_val;
++      if (hfe_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "prototype"))
++              .ToLocal(&proto_val) &&
++          proto_val->IsObject()) {
++        InstallOverrideFunction(isolate, context, proto_val.As<v8::Object>(),
++                                 "requestAutocomplete", "form",
++                                 "requestAutocompleteOverride", 0);
++      }
++    }
++  }
++
++  // 10. process.env.TZ (Electron renderer — accessor if process exists).
++  {
++    v8::Local<v8::Value> process_val;
++    if (global->Get(context, V8AtomicString(isolate, "process"))
++            .ToLocal(&process_val) &&
++        process_val->IsObject()) {
++      v8::Local<v8::Value> env_val;
++      if (process_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "env"))
++              .ToLocal(&env_val) &&
++          env_val->IsObject()) {
++        InstallOverrideProperty(isolate, context, env_val.As<v8::Object>(),
++                                 "TZ", "process", "timezoneOverride");
++      }
++    }
++  }
++
++  // 11. speechSynthesis.onvoiceschanged — wrap setter on
++  // SpeechSynthesis.prototype.
++  {
++    v8::Local<v8::Value> ss_val;
++    if (global->Get(context, V8AtomicString(isolate, "SpeechSynthesis"))
++            .ToLocal(&ss_val) &&
++        ss_val->IsFunction()) {
++      v8::Local<v8::Value> proto_val;
++      if (ss_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "prototype"))
++              .ToLocal(&proto_val) &&
++          proto_val->IsObject()) {
++        WrapGetterOnPrototype(isolate, context, proto_val.As<v8::Object>(),
++                               "onvoiceschanged", "speechSynthesis",
++                               "onvoiceschangedOverride");
++      }
++    }
++  }
++
++  // 12. MediaQueryList.prototype.onchange — wrap getter.
++  {
++    v8::Local<v8::Value> mql_val;
++    if (global->Get(context, V8AtomicString(isolate, "MediaQueryList"))
++            .ToLocal(&mql_val) &&
++        mql_val->IsFunction()) {
++      v8::Local<v8::Value> proto_val;
++      if (mql_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "prototype"))
++              .ToLocal(&proto_val) &&
++          proto_val->IsObject()) {
++        WrapGetterOnPrototype(isolate, context, proto_val.As<v8::Object>(),
++                               "onchange", "mediaQueryList",
++                               "onchangeOverride");
++      }
++    }
++  }
++
++  // 13. OfflineAudioContext.prototype.oncomplete — wrap getter.
++  {
++    v8::Local<v8::Value> oac_val;
++    if (global->Get(context, V8AtomicString(isolate, "OfflineAudioContext"))
++            .ToLocal(&oac_val) &&
++        oac_val->IsFunction()) {
++      v8::Local<v8::Value> proto_val;
++      if (oac_val.As<v8::Object>()
++              ->Get(context, V8AtomicString(isolate, "prototype"))
++              .ToLocal(&proto_val) &&
++          proto_val->IsObject()) {
++        WrapGetterOnPrototype(isolate, context, proto_val.As<v8::Object>(),
++                               "oncomplete", "offlineAudioContext",
++                               "oncompleteOverride");
++      }
++    }
++  }
++}
++
+ }  // namespace
+ 
+ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+@@ -804,6 +1357,7 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+   InstallSensorOverrides(isolate, context);
+   InstallIntersectionObserverOverrides(isolate, context);
+   InstallPostMessageOverrides(isolate, context);
++  InstallBatch20Overrides(isolate, context);
+   InstallPropertyExistenceOverrides(isolate, context);
+ }
+ 
