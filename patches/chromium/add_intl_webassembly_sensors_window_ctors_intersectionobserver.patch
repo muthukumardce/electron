@@ -1,0 +1,201 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 00:58:30 +0530
+Subject: Add Intl, WebAssembly, sensors, window ctors, IntersectionObserver
+ overrides (Batch 18: 30 APIs)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Intl: DateTimeFormat.resolvedOptions, NumberFormat + RelativeTimeFormat ctors.
+WebAssembly: compile, instantiate, validate, compileStreaming, instantiateStreaming.
+Sensors: Accelerometer, LinearAccelerationSensor, GravitySensor, Gyroscope,
+Magnetometer, AbsoluteOrientationSensor, RelativeOrientationSensor,
+AmbientLightSensor constructors.
+Window ctors: PointerEvent, Worker, SharedWorker, MessageChannel,
+BroadcastChannel, SpeechSynthesisUtterance, RTCPeerConnection,
+webkitRTCPeerConnection, IntersectionObserver, PerformanceObserver.
+IntersectionObserver prototype: observe, unobserve, disconnect, takeRecords.
+
+All Pattern V/X in v8_builtin_overrides.cc — no IDL changes needed.
+New install functions: InstallIntlOverrides, InstallWebAssemblyOverrides,
+InstallSensorOverrides, InstallIntersectionObserverOverrides.
+Expanded InstallConstructorOverrides kCtors table with 9 new entries.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 5cd6863ed9455d7fa975c07e62087404e738a2cb..ecbb46a50a286273093d4db682625036e5138ba0 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -521,6 +521,17 @@ void InstallConstructorOverrides(v8::Isolate* isolate,
+       {"SyntaxError", "error", "syntaxErrorConstructorOverride"},
+       {"Notification", "notification", "constructorOverride"},
+       {"FontFace", "fontFace", "constructorOverride"},
++      {"PointerEvent", "window", "pointerEventConstructorOverride"},
++      {"Worker", "window", "workerConstructorOverride"},
++      {"SharedWorker", "window", "sharedWorkerConstructorOverride"},
++      {"MessageChannel", "window", "messageChannelConstructorOverride"},
++      {"BroadcastChannel", "window", "broadcastChannelConstructorOverride"},
++      {"SpeechSynthesisUtterance", "speechSynthesis",
++       "utteranceConstructorOverride"},
++      {"RTCPeerConnection", "rtcPeerConnection", "constructorOverride"},
++      {"webkitRTCPeerConnection", "rtcPeerConnection",
++       "webkitConstructorOverride"},
++      {"PerformanceObserver", "performance", "observerConstructorOverride"},
+   };
+ 
+   for (const auto& ctor : kCtors) {
+@@ -529,6 +540,143 @@ void InstallConstructorOverrides(v8::Isolate* isolate,
+   }
+ }
+ 
++// Install Intl overrides.
++void InstallIntlOverrides(v8::Isolate* isolate,
++                           v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Value> intl_val;
++  if (!global->Get(context, V8AtomicString(isolate, "Intl"))
++           .ToLocal(&intl_val) ||
++      !intl_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Object> intl = intl_val.As<v8::Object>();
++
++  // Wrap Intl.NumberFormat constructor (Pattern X).
++  WrapConstructorOnGlobal(isolate, context, intl, "NumberFormat", "intl",
++                           "numberFormatConstructorOverride");
++
++  // Wrap Intl.RelativeTimeFormat constructor (Pattern X).
++  WrapConstructorOnGlobal(isolate, context, intl, "RelativeTimeFormat", "intl",
++                           "relativeTimeFormatConstructorOverride");
++
++  // Wrap Intl.DateTimeFormat.prototype.resolvedOptions (Pattern V).
++  v8::Local<v8::Value> dtf_val;
++  if (!intl->Get(context, V8AtomicString(isolate, "DateTimeFormat"))
++           .ToLocal(&dtf_val) ||
++      !dtf_val->IsFunction()) {
++    return;
++  }
++  v8::Local<v8::Value> dtf_proto_val;
++  if (!dtf_val.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, "prototype"))
++           .ToLocal(&dtf_proto_val) ||
++      !dtf_proto_val->IsObject()) {
++    return;
++  }
++  WrapFunctionOnObject(isolate, context, dtf_proto_val.As<v8::Object>(),
++                        "resolvedOptions", "intl", "resolvedOptionsOverride");
++}
++
++// Install WebAssembly function overrides.
++void InstallWebAssemblyOverrides(v8::Isolate* isolate,
++                                  v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Value> wasm_val;
++  if (!global->Get(context, V8AtomicString(isolate, "WebAssembly"))
++           .ToLocal(&wasm_val) ||
++      !wasm_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Object> wasm = wasm_val.As<v8::Object>();
++
++  static const struct {
++    const char* fn_name;
++    const char* override_name;
++  } kWasmFns[] = {
++      {"compile", "compileOverride"},
++      {"instantiate", "instantiateOverride"},
++      {"validate", "validateOverride"},
++      {"compileStreaming", "compileStreamingOverride"},
++      {"instantiateStreaming", "instantiateStreamingOverride"},
++  };
++
++  for (const auto& fn : kWasmFns) {
++    WrapFunctionOnObject(isolate, context, wasm, fn.fn_name, "webAssembly",
++                         fn.override_name);
++  }
++}
++
++// Install sensor constructor overrides.
++void InstallSensorOverrides(v8::Isolate* isolate,
++                             v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++
++  static const struct {
++    const char* ctor_name;
++    const char* override_name;
++  } kSensors[] = {
++      {"Accelerometer", "accelerometerConstructorOverride"},
++      {"LinearAccelerationSensor",
++       "linearAccelerationSensorConstructorOverride"},
++      {"GravitySensor", "gravitySensorConstructorOverride"},
++      {"Gyroscope", "gyroscopeConstructorOverride"},
++      {"Magnetometer", "magnetometerConstructorOverride"},
++      {"AbsoluteOrientationSensor",
++       "absoluteOrientationSensorConstructorOverride"},
++      {"RelativeOrientationSensor",
++       "relativeOrientationSensorConstructorOverride"},
++      {"AmbientLightSensor", "ambientLightSensorConstructorOverride"},
++  };
++
++  for (const auto& s : kSensors) {
++    WrapConstructorOnGlobal(isolate, context, global, s.ctor_name, "sensors",
++                             s.override_name);
++  }
++}
++
++// Install IntersectionObserver overrides (constructor + prototype methods).
++void InstallIntersectionObserverOverrides(v8::Isolate* isolate,
++                                           v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++
++  // Wrap constructor (Pattern X).
++  WrapConstructorOnGlobal(isolate, context, global, "IntersectionObserver",
++                           "intersectionObserver", "constructorOverride");
++
++  // Re-fetch (now wrapper) to get shared prototype.
++  v8::Local<v8::Value> io_val;
++  if (!global
++           ->Get(context, V8AtomicString(isolate, "IntersectionObserver"))
++           .ToLocal(&io_val) ||
++      !io_val->IsFunction()) {
++    return;
++  }
++  v8::Local<v8::Value> proto_val;
++  if (!io_val.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, "prototype"))
++           .ToLocal(&proto_val) ||
++      !proto_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Object> proto = proto_val.As<v8::Object>();
++
++  static const struct {
++    const char* fn_name;
++    const char* override_name;
++  } kIOFns[] = {
++      {"observe", "observeOverride"},
++      {"unobserve", "unobserveOverride"},
++      {"disconnect", "disconnectOverride"},
++      {"takeRecords", "takeRecordsOverride"},
++  };
++
++  for (const auto& fn : kIOFns) {
++    WrapFunctionOnObject(isolate, context, proto, fn.fn_name,
++                         "intersectionObserver", fn.override_name);
++  }
++}
++
+ }  // namespace
+ 
+ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+@@ -542,6 +690,10 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+   InstallDateOverrides(isolate, context);
+   InstallFunctionOverrides(isolate, context);
+   InstallConstructorOverrides(isolate, context);
++  InstallIntlOverrides(isolate, context);
++  InstallWebAssemblyOverrides(isolate, context);
++  InstallSensorOverrides(isolate, context);
++  InstallIntersectionObserverOverrides(isolate, context);
+ }
+ 
+ }  // namespace blink
