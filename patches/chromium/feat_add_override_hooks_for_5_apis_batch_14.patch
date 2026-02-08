@@ -1,0 +1,610 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 8 Feb 2026 21:02:16 +0530
+Subject: feat: add override hooks for 5 APIs (Batch 14)
+
+HTMLTextAreaElement.autocomplete, window.orientation,
+CacheStorage.match, WebGLRenderingContext.readPixels,
+WebGL2RenderingContext.getBufferSubData
+
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 3dfc01350435dd08c3b4346dc7871edd1448b0b3..92edce05f603e0fc1d731d52364c8382316af85e 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -1203,6 +1203,29 @@ int LocalDOMWindow::orientation() const {
+   return orientation;
+ }
+ 
++int LocalDOMWindow::orientationForBinding(ScriptState* script_state) const {
++  int value = orientation();
++  if (!script_state || !script_state->ContextIsValid())
++    return value;
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  ScriptState::Scope scope(script_state);
++  v8::Local<v8::Function> override_fn =
++      GetCustomOverrideFunction(script_state, "window", "orientationOverride");
++  if (override_fn.IsEmpty())
++    return value;
++  v8::Local<v8::Value> argv[] = {v8::Integer::New(isolate, value)};
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> result;
++  if (!override_fn
++           ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, argv)
++           .ToLocal(&result))
++    return value;
++  if (result->IsInt32())
++    return result.As<v8::Int32>()->Value();
++  return value;
++}
++
+ Screen* LocalDOMWindow::screen() {
+   if (!screen_) {
+     LocalFrame* frame = GetFrame();
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.h b/third_party/blink/renderer/core/frame/local_dom_window.h
+index 393ddd6ebfe3e564670d482c57c288a1c038dfc0..bad8abc1f8cf940f5cce62b8bb01713d83a0c524 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.h
++++ b/third_party/blink/renderer/core/frame/local_dom_window.h
+@@ -367,6 +367,7 @@ class CORE_EXPORT LocalDOMWindow final : public DOMWindow,
+   //  0 is straight up; -90 is when the device is rotated 90 clockwise;
+   //  90 is when rotated counter clockwise.
+   int orientation() const;
++  int orientationForBinding(ScriptState*) const;
+ 
+   DOMSelection* getSelection();
+ 
+diff --git a/third_party/blink/renderer/core/frame/window.idl b/third_party/blink/renderer/core/frame/window.idl
+index 216eac862e9dccbfe05fb094394fbd6ed549aa7b..85aa14506567f609fe35a3e5e3327b2792940010 100644
+--- a/third_party/blink/renderer/core/frame/window.idl
++++ b/third_party/blink/renderer/core/frame/window.idl
+@@ -173,7 +173,7 @@
+     // This is the interface orientation in degrees. Some examples are:
+     //  0 is straight up; -90 is when the device is rotated 90 clockwise;
+     //  90 is when rotated counter clockwise.
+-    [MeasureAs=WindowOrientation, RuntimeEnabled=OrientationEvent] readonly attribute long orientation;
++    [MeasureAs=WindowOrientation, RuntimeEnabled=OrientationEvent, CallWith=ScriptState, ImplementedAs=orientationForBinding] readonly attribute long orientation;
+ 
+     // Event handler attribute for the pageswap event.
+     [RuntimeEnabled=PageSwapEvent] attribute EventHandler onpageswap;
+diff --git a/third_party/blink/renderer/core/html/forms/html_text_area_element.cc b/third_party/blink/renderer/core/html/forms/html_text_area_element.cc
+index d4d9bfff7ff3ba3e957ed7d0d4ccac715e450965..27182ad41d14cdc46b7645129251460d01ac9bea 100644
+--- a/third_party/blink/renderer/core/html/forms/html_text_area_element.cc
++++ b/third_party/blink/renderer/core/html/forms/html_text_area_element.cc
+@@ -58,7 +58,10 @@
+ #include "third_party/blink/renderer/core/layout/layout_object_inlines.h"
+ #include "third_party/blink/renderer/core/page/chrome_client.h"
+ #include "third_party/blink/renderer/core/page/page.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
++#include "third_party/blink/renderer/platform/bindings/script_state.h"
++#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/instrumentation/tracing/trace_event.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+@@ -112,6 +115,35 @@ HTMLTextAreaElement::HTMLTextAreaElement(Document& document)
+   }
+ }
+ 
++String HTMLTextAreaElement::autocompleteForBinding(
++    ScriptState* script_state) const {
++  String result = IDLExposedAutofillValue();
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "htmlTextAreaElement", "autocompleteOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> args[] = {V8String(isolate, result)};
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
++              .ToLocal(&override_result)) {
++        if (override_result->IsString()) {
++          return ToCoreString(isolate, override_result.As<v8::String>());
++        }
++      }
++    }
++  }
++  return result;
++}
++
++void HTMLTextAreaElement::setAutocompleteForBinding(ScriptState*,
++                                                    const String& value) {
++  setIDLExposedAutofillValue(value);
++}
++
+ void HTMLTextAreaElement::DidAddUserAgentShadowRoot(ShadowRoot& root) {
+   root.AppendChild(CreateInnerEditorElement());
+ }
+diff --git a/third_party/blink/renderer/core/html/forms/html_text_area_element.h b/third_party/blink/renderer/core/html/forms/html_text_area_element.h
+index 563b41a778356bf9573dc7d85a6c8e3036f556eb..033c4acaf58d04e11594cbc1012d02386257ebc5 100644
+--- a/third_party/blink/renderer/core/html/forms/html_text_area_element.h
++++ b/third_party/blink/renderer/core/html/forms/html_text_area_element.h
+@@ -32,6 +32,7 @@
+ namespace blink {
+ 
+ class BeforeTextInsertedEvent;
++class ScriptState;
+ 
+ class CORE_EXPORT HTMLTextAreaElement final : public TextControlElement {
+   DEFINE_WRAPPERTYPEINFO();
+@@ -56,6 +57,8 @@ class CORE_EXPORT HTMLTextAreaElement final : public TextControlElement {
+   String defaultValue() const;
+   void setDefaultValue(const String&);
+   int textLength() const { return Value().length(); }
++  String autocompleteForBinding(ScriptState*) const;
++  void setAutocompleteForBinding(ScriptState*, const String&);
+   String InnerEditorValue() const override;
+ 
+   // Sets the suggested value and puts the element into
+diff --git a/third_party/blink/renderer/core/html/forms/html_text_area_element.idl b/third_party/blink/renderer/core/html/forms/html_text_area_element.idl
+index 47ab3c5df396648d0e40f21ea87a3b4ab1382626..6828314e19b4a642ad606e00e07625d920324c1d 100644
+--- a/third_party/blink/renderer/core/html/forms/html_text_area_element.idl
++++ b/third_party/blink/renderer/core/html/forms/html_text_area_element.idl
+@@ -24,7 +24,7 @@
+     Exposed=Window
+ ] interface HTMLTextAreaElement : HTMLElement {
+     [HTMLConstructor] constructor();
+-    [CEReactions, ImplementedAs=IDLExposedAutofillValue] attribute DOMString autocomplete;
++    [CEReactions, CallWith=ScriptState, ImplementedAs=autocompleteForBinding] attribute DOMString autocomplete;
+     [CEReactions] attribute unsigned long cols;
+     [CEReactions, Reflect] attribute DOMString dirName;
+     [CEReactions, Reflect] attribute boolean disabled;
+diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.cc b/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
+index ca2a67644ec8cdcc1e934e92276f8c6a13b5366d..fc50a7453bebe61116a0fe6bd8217680f39a0d5c 100644
+--- a/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
++++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.cc
+@@ -608,6 +608,29 @@ void CacheStorage::KeysImpl(
+           base::TimeTicks::Now(), trace_id)));
+ }
+ 
++ScriptPromise<Response> CacheStorage::matchForBinding(
++    ScriptState* script_state,
++    const V8RequestInfo* request,
++    const MultiCacheQueryOptions* options,
++    ExceptionState& exception_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "cacheStorage", "matchOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&override_result)) {
++      }
++    }
++  }
++  return match(script_state, request, options, exception_state);
++}
++
+ ScriptPromise<Cache> CacheStorage::openForBinding(
+     ScriptState* script_state,
+     const String& cache_name,
+diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.h b/third_party/blink/renderer/modules/cache_storage/cache_storage.h
+index edf8c25a989dc6abab9b1269208c1a2bcd72f366..35cc711c5e0201f1416b4e71a28b0c5806cfda48 100644
+--- a/third_party/blink/renderer/modules/cache_storage/cache_storage.h
++++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.h
+@@ -57,6 +57,10 @@ class CacheStorage final : public ScriptWrappable,
+                                 ExceptionState& exception_state);
+ 
+   // ForBinding wrappers for override hooks
++  ScriptPromise<Response> matchForBinding(ScriptState*,
++                                          const V8RequestInfo*,
++                                          const MultiCacheQueryOptions*,
++                                          ExceptionState&);
+   ScriptPromise<Cache> openForBinding(ScriptState*,
+                                       const String& cache_name,
+                                       ExceptionState&);
+diff --git a/third_party/blink/renderer/modules/cache_storage/cache_storage.idl b/third_party/blink/renderer/modules/cache_storage/cache_storage.idl
+index c2e5a2182cbc6c6c95765aaade9294303f4eeca6..a6d47a965de540a0557c5a0ef532456ac528cc39 100644
+--- a/third_party/blink/renderer/modules/cache_storage/cache_storage.idl
++++ b/third_party/blink/renderer/modules/cache_storage/cache_storage.idl
+@@ -8,7 +8,7 @@
+     SecureContext,
+     Exposed=(Window,Worker)
+ ] interface CacheStorage {
+-  [CallWith=ScriptState, MeasureAs=CacheStorageRead, RaisesException]
++  [CallWith=ScriptState, MeasureAs=CacheStorageRead, RaisesException, ImplementedAs=matchForBinding]
+   Promise<Response> match(RequestInfo request,
+                      optional MultiCacheQueryOptions options = {});
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+index a53989784bbac0d8343ab2be557180adf34a68e0..5dd11b23588ffc2bacc62a57cf3404ce87dc677d 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -463,6 +463,30 @@ void WebGL2RenderingContextBase::getBufferSubData(
+   ContextGL()->UnmapBuffer(target);
+ }
+ 
++void WebGL2RenderingContextBase::getBufferSubDataForBinding(
++    ScriptState* script_state,
++    GLenum target,
++    int64_t src_byte_offset,
++    MaybeShared<DOMArrayBufferView> dst_data,
++    int64_t dst_offset,
++    GLuint length) {
++  getBufferSubData(target, src_byte_offset, dst_data, dst_offset, length);
++  if (dst_data.Get() && script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webgl2RenderingContext", "getBufferSubDataOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> array_value =
++          ToV8Traits<DOMArrayBufferView>::ToV8(script_state, dst_data.Get());
++      v8::Local<v8::Value> args[] = {array_value};
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 1, args);
++    }
++  }
++}
++
+ void WebGL2RenderingContextBase::blitFramebuffer(GLint src_x0,
+                                                  GLint src_y0,
+                                                  GLint src_x1,
+@@ -950,6 +974,58 @@ void WebGL2RenderingContextBase::readPixels(GLint x,
+   }
+ }
+ 
++void WebGL2RenderingContextBase::readPixelsForBinding(
++    ScriptState* script_state,
++    GLint x,
++    GLint y,
++    GLsizei width,
++    GLsizei height,
++    GLenum format,
++    GLenum type,
++    MaybeShared<DOMArrayBufferView> pixels,
++    int64_t offset) {
++  readPixels(x, y, width, height, format, type, pixels, offset);
++  if (pixels.Get() && script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webglRenderingContext", "readPixelsOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> array_value =
++          ToV8Traits<DOMArrayBufferView>::ToV8(script_state, pixels.Get());
++      v8::Local<v8::Value> args[] = {array_value};
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 1, args);
++    }
++  }
++}
++
++void WebGL2RenderingContextBase::readPixelsOffsetForBinding(
++    ScriptState* script_state,
++    GLint x,
++    GLint y,
++    GLsizei width,
++    GLsizei height,
++    GLenum format,
++    GLenum type,
++    int64_t offset) {
++  readPixels(x, y, width, height, format, type, offset);
++  // PBO readPixels - data goes to GPU buffer, no ArrayBufferView to pass.
++  // Notify override only.
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webglRenderingContext", "readPixelsOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 0, nullptr);
++    }
++  }
++}
++
+ void WebGL2RenderingContextBase::RenderbufferStorageHelper(
+     GLenum target,
+     GLsizei samples,
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h
+index 2d8f0e1ab81bc7a5cb134a8ae733e0ccc3435cec..d8e989eb379c8249134479734b86cd87aa9e2a02 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.h
+@@ -878,6 +878,30 @@ class WebGL2RenderingContextBase : public WebGLRenderingContextBase {
+   void bindBufferRange(GLenum, GLuint, WebGLBuffer*, int64_t, int64_t);
+   virtual ScriptValue getIndexedParameter(ScriptState*, GLenum, GLuint);
+   ScriptValue getIndexedParameterForBinding(ScriptState*, GLenum, GLuint);
++  void getBufferSubDataForBinding(ScriptState*,
++                                  GLenum,
++                                  int64_t,
++                                  MaybeShared<DOMArrayBufferView>,
++                                  int64_t,
++                                  GLuint);
++  using WebGLRenderingContextBase::readPixelsForBinding;
++  void readPixelsForBinding(ScriptState*,
++                            GLint x,
++                            GLint y,
++                            GLsizei width,
++                            GLsizei height,
++                            GLenum format,
++                            GLenum type,
++                            MaybeShared<DOMArrayBufferView> pixels,
++                            int64_t offset);
++  void readPixelsOffsetForBinding(ScriptState*,
++                                  GLint x,
++                                  GLint y,
++                                  GLsizei width,
++                                  GLsizei height,
++                                  GLenum format,
++                                  GLenum type,
++                                  int64_t offset);
+   std::optional<Vector<GLuint>> getUniformIndices(WebGLProgram*,
+                                                   const Vector<String>&);
+   ScriptValue getActiveUniforms(ScriptState*,
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl
+index 47eff182a2cf7e697abdc30ce3d1dafe341ec9b3..be420e8aef8a9cb9bf4820f3b97ed9c5d0e0f71b 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.idl
+@@ -280,7 +280,7 @@ interface mixin WebGL2RenderingContextBase {
+     void bufferSubData(GLenum target, GLintptr dstByteOffset, [AllowShared, BufferSourceTypeNoSizeLimit] ArrayBufferView srcData,
+         GLintptr srcOffset, optional GLuint length = 0);
+     void copyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+-    void getBufferSubData(GLenum target, GLintptr srcByteOffset, [AllowShared, BufferSourceTypeNoSizeLimit] ArrayBufferView dstData,
++    [CallWith=ScriptState, ImplementedAs=getBufferSubDataForBinding] void getBufferSubData(GLenum target, GLintptr srcByteOffset, [AllowShared, BufferSourceTypeNoSizeLimit] ArrayBufferView dstData,
+         optional GLintptr dstOffset = 0, optional GLuint length = 0);
+ 
+     /* Framebuffer objects */
+@@ -514,7 +514,7 @@ interface mixin WebGL2RenderingContextBase {
+     void bindVertexArray(WebGLVertexArrayObject? vertexArray);
+ 
+     /* Reading */
+-    void readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type,
++    [CallWith=ScriptState, ImplementedAs=readPixelsForBinding] void readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type,
+         [AllowShared, BufferSourceTypeNoSizeLimit] ArrayBufferView dstData, GLintptr offset);
+-    void readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLintptr offset);
++    [CallWith=ScriptState, ImplementedAs=readPixelsOffsetForBinding] void readPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLintptr offset);
+ };
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 41858352d9f96694f468a73ab565e489f1d8be27..60f3f8fbafe65a83319ddabc88f04b9899857297 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -5177,6 +5177,32 @@ void WebGLRenderingContextBase::readPixels(
+   ReadPixelsHelper(x, y, width, height, format, type, pixels.Get(), 0);
+ }
+ 
++void WebGLRenderingContextBase::readPixelsForBinding(
++    ScriptState* script_state,
++    GLint x,
++    GLint y,
++    GLsizei width,
++    GLsizei height,
++    GLenum format,
++    GLenum type,
++    MaybeShared<DOMArrayBufferView> pixels) {
++  readPixels(x, y, width, height, format, type, pixels);
++  if (pixels.Get() && script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webglRenderingContext", "readPixelsOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> array_value =
++          ToV8Traits<DOMArrayBufferView>::ToV8(script_state, pixels.Get());
++      v8::Local<v8::Value> args[] = {array_value};
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 1, args);
++    }
++  }
++}
++
+ void WebGLRenderingContextBase::ReadPixelsHelper(GLint x,
+                                                  GLint y,
+                                                  GLsizei width,
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+index 7a805ea02e54df77b8010a50c87d41b65c97a920..6d14af97d7890b99e956b9b94e2c4a23d5369fca 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -323,6 +323,14 @@ class MODULES_EXPORT WebGLRenderingContextBase
+   String getShaderSource(WebGLShader*);
+   std::optional<Vector<String>> getSupportedExtensions();
+   std::optional<Vector<String>> getSupportedExtensionsForBinding(ScriptState*);
++  void readPixelsForBinding(ScriptState*,
++                            GLint x,
++                            GLint y,
++                            GLsizei width,
++                            GLsizei height,
++                            GLenum format,
++                            GLenum type,
++                            MaybeShared<DOMArrayBufferView> pixels);
+   virtual ScriptValue getTexParameter(ScriptState*,
+                                       GLenum target,
+                                       GLenum pname);
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
+index 58b20e7bbb9fd48a746a7667529a300307246919..79078e4c6bb7128851c605f17d4ca450aae83162 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.idl
+@@ -597,7 +597,7 @@ interface mixin WebGLRenderingContextBase {
+     void pixelStorei(GLenum pname, GLint param);
+     void polygonOffset(GLfloat factor, GLfloat units);
+ 
+-    void readPixels(
++    [CallWith=ScriptState, ImplementedAs=readPixelsForBinding] void readPixels(
+         GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type,
+         [AllowShared, BufferSourceTypeNoSizeLimit] ArrayBufferView? pixels);
+ 
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+index 1ad6328ad0b7f263367379877ff3ccb32669915e..00a3ef8ce69578baf1aad1175446d89b0f6c668e 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+@@ -1472,6 +1472,32 @@ void WebGLRenderingContextWebGPUBase::readPixels(
+   NOTIMPLEMENTED();
+ }
+ 
++void WebGLRenderingContextWebGPUBase::readPixelsForBinding(
++    ScriptState* script_state,
++    GLint x,
++    GLint y,
++    GLsizei width,
++    GLsizei height,
++    GLenum format,
++    GLenum type,
++    MaybeShared<DOMArrayBufferView> pixels) {
++  readPixels(x, y, width, height, format, type, pixels);
++  if (pixels.Get() && script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webglRenderingContext", "readPixelsOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> array_value =
++          ToV8Traits<DOMArrayBufferView>::ToV8(script_state, pixels.Get());
++      v8::Local<v8::Value> args[] = {array_value};
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 1, args);
++    }
++  }
++}
++
+ void WebGLRenderingContextWebGPUBase::renderbufferStorage(GLenum target,
+                                                           GLenum internalformat,
+                                                           GLsizei width,
+@@ -2089,6 +2115,30 @@ void WebGLRenderingContextWebGPUBase::getBufferSubData(
+   NOTIMPLEMENTED();
+ }
+ 
++void WebGLRenderingContextWebGPUBase::getBufferSubDataForBinding(
++    ScriptState* script_state,
++    GLenum target,
++    int64_t src_byte_offset,
++    MaybeShared<DOMArrayBufferView> dst_data,
++    int64_t dst_offset,
++    GLuint length) {
++  getBufferSubData(target, src_byte_offset, dst_data, dst_offset, length);
++  if (dst_data.Get() && script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webgl2RenderingContext", "getBufferSubDataOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> array_value =
++          ToV8Traits<DOMArrayBufferView>::ToV8(script_state, dst_data.Get());
++      v8::Local<v8::Value> args[] = {array_value};
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 1, args);
++    }
++  }
++}
++
+ void WebGLRenderingContextWebGPUBase::blitFramebuffer(GLint src_x0,
+                                                       GLint src_y0,
+                                                       GLint src_x1,
+@@ -3556,6 +3606,56 @@ void WebGLRenderingContextWebGPUBase::readPixels(
+   NOTIMPLEMENTED();
+ }
+ 
++void WebGLRenderingContextWebGPUBase::readPixelsForBinding(
++    ScriptState* script_state,
++    GLint x,
++    GLint y,
++    GLsizei width,
++    GLsizei height,
++    GLenum format,
++    GLenum type,
++    MaybeShared<DOMArrayBufferView> pixels,
++    int64_t offset) {
++  readPixels(x, y, width, height, format, type, pixels, offset);
++  if (pixels.Get() && script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webglRenderingContext", "readPixelsOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Value> array_value =
++          ToV8Traits<DOMArrayBufferView>::ToV8(script_state, pixels.Get());
++      v8::Local<v8::Value> args[] = {array_value};
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 1, args);
++    }
++  }
++}
++
++void WebGLRenderingContextWebGPUBase::readPixelsOffsetForBinding(
++    ScriptState* script_state,
++    GLint x,
++    GLint y,
++    GLsizei width,
++    GLsizei height,
++    GLenum format,
++    GLenum type,
++    int64_t offset) {
++  readPixels(x, y, width, height, format, type, offset);
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "webglRenderingContext", "readPixelsOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      std::ignore = override_fn->Call(script_state->GetContext(),
++                                      v8::Undefined(isolate), 0, nullptr);
++    }
++  }
++}
++
+ // **************************************************************************
+ // End of WebGL2RenderingContextBase's IDL methods
+ // **************************************************************************
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
+index a4074e8a381abab5060994cd59816bed6f246138..2dc751c4ac28624f327e0604b23f42096634729b 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.h
+@@ -237,6 +237,14 @@ class MODULES_EXPORT WebGLRenderingContextWebGPUBase
+   WebGLShaderPrecisionFormat* getShaderPrecisionFormatForBinding(
+       ScriptState*, GLenum shader_type, GLenum precision_type);
+   std::optional<Vector<String>> getSupportedExtensionsForBinding(ScriptState*);
++  void readPixelsForBinding(ScriptState*,
++                            GLint x,
++                            GLint y,
++                            GLsizei width,
++                            GLsizei height,
++                            GLenum format,
++                            GLenum type,
++                            MaybeShared<DOMArrayBufferView> pixels);
+ 
+   void hint(GLenum target, GLenum mode);
+   bool isBuffer(WebGLBuffer*);
+@@ -1300,6 +1308,29 @@ class MODULES_EXPORT WebGLRenderingContextWebGPUBase
+       ScriptState*, WebGLProgram* program, GLuint index);
+   ScriptValue getIndexedParameterForBinding(
+       ScriptState*, GLenum target, GLuint index);
++  void getBufferSubDataForBinding(ScriptState*,
++                                  GLenum,
++                                  int64_t,
++                                  MaybeShared<DOMArrayBufferView>,
++                                  int64_t,
++                                  GLuint);
++  void readPixelsForBinding(ScriptState*,
++                            GLint x,
++                            GLint y,
++                            GLsizei width,
++                            GLsizei height,
++                            GLenum format,
++                            GLenum type,
++                            MaybeShared<DOMArrayBufferView> pixels,
++                            int64_t offset);
++  void readPixelsOffsetForBinding(ScriptState*,
++                                  GLint x,
++                                  GLint y,
++                                  GLsizei width,
++                                  GLsizei height,
++                                  GLenum format,
++                                  GLenum type,
++                                  int64_t offset);
+ 
+   // **************************************************************************
+   // End of WebGL2RenderingContextBase's IDL methods
