@@ -1,0 +1,369 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 00:38:46 +0530
+Subject: Add Pattern X constructor wrapping + Date/Function/Error overrides
+ (Batch 17: 10 APIs)
+
+New infrastructure: GenericConstructorWrapper, WrapConstructorOnGlobal,
+WrapSymbolFunctionOnObject. Date constructor + valueOf + Symbol.toPrimitive,
+Function.prototype.toString, Error/TypeError/RangeError/SyntaxError constructors,
+Notification + FontFace constructors.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index d5fd8c7a35ee3027081082b66cd3d2f6209b128e..5cd6863ed9455d7fa975c07e62087404e738a2cb 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -103,6 +103,113 @@ void GenericBuiltinWrapper(const v8::FunctionCallbackInfo<v8::Value>& info) {
+   }
+ }
+ 
++// Generic wrapper callback for constructors (Pattern X).
++// Handles both `new Ctor(args)` and `Ctor(args)` calls.
++// For constructor calls: creates instance via original, override modifies
++// in-place (return value ignored). For regular calls: delegates to original,
++// override can replace return value.
++void GenericConstructorWrapper(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++
++  v8::Local<v8::Array> data = info.Data().As<v8::Array>();
++  v8::Local<v8::Function> original_fn =
++      data->Get(context, kDataOriginalFn).ToLocalChecked().As<v8::Function>();
++
++  int argc = info.Length();
++  std::vector<v8::Local<v8::Value>> argv(argc);
++  for (int i = 0; i < argc; i++) {
++    argv[i] = info[i];
++  }
++
++  v8::TryCatch try_catch(isolate);
++  v8::Local<v8::Value> result;
++
++  if (info.IsConstructCall()) {
++    v8::Local<v8::Object> instance;
++    if (!original_fn->NewInstance(context, argc, argv.data())
++             .ToLocal(&instance)) {
++      if (try_catch.HasCaught()) {
++        try_catch.ReThrow();
++      }
++      return;
++    }
++    result = instance;
++  } else {
++    if (!original_fn->Call(context, info.This(), argc, argv.data())
++             .ToLocal(&result)) {
++      if (try_catch.HasCaught()) {
++        try_catch.ReThrow();
++      }
++      return;
++    }
++  }
++
++  // Look up override.
++  v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Value> custom_overrides;
++  if (!global
++           ->Get(context, V8AtomicString(isolate, "customOverrides"))
++           .ToLocal(&custom_overrides) ||
++      !custom_overrides->IsObject()) {
++    info.GetReturnValue().Set(result);
++    return;
++  }
++
++  v8::Local<v8::String> interface_key =
++      data->Get(context, kDataInterfaceKey).ToLocalChecked().As<v8::String>();
++  v8::Local<v8::Value> iface;
++  if (!custom_overrides.As<v8::Object>()
++           ->Get(context, interface_key)
++           .ToLocal(&iface) ||
++      !iface->IsObject()) {
++    info.GetReturnValue().Set(result);
++    return;
++  }
++
++  v8::Local<v8::String> override_name =
++      data->Get(context, kDataOverrideName).ToLocalChecked().As<v8::String>();
++  v8::Local<v8::Value> override_fn_val;
++  if (!iface.As<v8::Object>()
++           ->Get(context, override_name)
++           .ToLocal(&override_fn_val) ||
++      !override_fn_val->IsFunction()) {
++    info.GetReturnValue().Set(result);
++    return;
++  }
++
++  // Call override with (instance/result, ...args).
++  v8::Local<v8::Function> override_fn = override_fn_val.As<v8::Function>();
++  std::vector<v8::Local<v8::Value>> override_argv(argc + 1);
++  override_argv[0] = result;
++  for (int i = 0; i < argc; i++) {
++    override_argv[i + 1] = info[i];
++  }
++
++  v8::TryCatch override_try_catch(isolate);
++  v8::Local<v8::Value> override_result;
++  if (!override_fn
++           ->Call(context, v8::Undefined(isolate), argc + 1,
++                  override_argv.data())
++           .ToLocal(&override_result)) {
++    info.GetReturnValue().Set(result);
++    return;
++  }
++
++  if (info.IsConstructCall()) {
++    // Constructor: override modifies in-place, return value ignored.
++    info.GetReturnValue().Set(result);
++  } else {
++    // Regular call: override can replace return value.
++    if (!override_result->IsNullOrUndefined()) {
++      info.GetReturnValue().Set(override_result);
++    } else {
++      info.GetReturnValue().Set(result);
++    }
++  }
++}
++
+ // Wraps a single function on a target object with GenericBuiltinWrapper.
+ // Returns true on success.
+ bool WrapFunctionOnObject(v8::Isolate* isolate,
+@@ -148,6 +255,130 @@ bool WrapFunctionOnObject(v8::Isolate* isolate,
+   return target->Set(context, name_str, wrapper).FromMaybe(false);
+ }
+ 
++// Wraps a symbol-keyed function (e.g. Symbol.toPrimitive) on a target object.
++bool WrapSymbolFunctionOnObject(v8::Isolate* isolate,
++                                v8::Local<v8::Context> context,
++                                v8::Local<v8::Object> target,
++                                v8::Local<v8::Symbol> symbol_key,
++                                const char* display_name,
++                                const char* interface_key,
++                                const char* override_name) {
++  v8::Local<v8::Value> original_val;
++  if (!target->Get(context, symbol_key).ToLocal(&original_val) ||
++      !original_val->IsFunction()) {
++    return false;
++  }
++  v8::Local<v8::Function> original_fn = original_val.As<v8::Function>();
++
++  v8::Local<v8::Value> data_items[] = {
++      original_fn,
++      V8AtomicString(isolate, interface_key),
++      V8AtomicString(isolate, override_name),
++  };
++  v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 3);
++
++  int fn_length = 0;
++  v8::Local<v8::Value> length_val;
++  if (original_fn->Get(context, V8AtomicString(isolate, "length"))
++           .ToLocal(&length_val) &&
++      length_val->IsInt32()) {
++    fn_length = length_val.As<v8::Int32>()->Value();
++  }
++
++  v8::Local<v8::Function> wrapper;
++  if (!v8::Function::New(context, GenericBuiltinWrapper, data, fn_length)
++           .ToLocal(&wrapper)) {
++    return false;
++  }
++
++  wrapper->SetName(V8AtomicString(isolate, display_name));
++  return target->Set(context, symbol_key, wrapper).FromMaybe(false);
++}
++
++// Wraps a constructor on the global object (Pattern X).
++// Copies prototype and own properties from original to wrapper.
++bool WrapConstructorOnGlobal(v8::Isolate* isolate,
++                             v8::Local<v8::Context> context,
++                             v8::Local<v8::Object> global,
++                             const char* ctor_name,
++                             const char* interface_key,
++                             const char* override_name) {
++  v8::Local<v8::String> name_str = V8AtomicString(isolate, ctor_name);
++  v8::Local<v8::Value> original_val;
++  if (!global->Get(context, name_str).ToLocal(&original_val) ||
++      !original_val->IsFunction()) {
++    return false;
++  }
++  v8::Local<v8::Function> original_fn = original_val.As<v8::Function>();
++
++  v8::Local<v8::Value> data_items[] = {
++      original_fn,
++      V8AtomicString(isolate, interface_key),
++      V8AtomicString(isolate, override_name),
++  };
++  v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 3);
++
++  int fn_length = 0;
++  v8::Local<v8::Value> length_val;
++  if (original_fn->Get(context, V8AtomicString(isolate, "length"))
++           .ToLocal(&length_val) &&
++      length_val->IsInt32()) {
++    fn_length = length_val.As<v8::Int32>()->Value();
++  }
++
++  v8::Local<v8::Function> wrapper;
++  if (!v8::Function::New(context, GenericConstructorWrapper, data, fn_length)
++           .ToLocal(&wrapper)) {
++    return false;
++  }
++
++  wrapper->SetName(name_str);
++
++  // Share prototype so instanceof works.
++  v8::Local<v8::Value> proto;
++  if (original_fn->Get(context, V8AtomicString(isolate, "prototype"))
++           .ToLocal(&proto)) {
++    wrapper->Set(context, V8AtomicString(isolate, "prototype"), proto).Check();
++    if (proto->IsObject()) {
++      proto.As<v8::Object>()
++          ->Set(context, V8AtomicString(isolate, "constructor"), wrapper)
++          .Check();
++    }
++  }
++
++  // Copy own properties from original to wrapper (static methods, constants).
++  v8::Local<v8::String> skip_props[] = {
++      V8AtomicString(isolate, "prototype"),
++      V8AtomicString(isolate, "length"),
++      V8AtomicString(isolate, "name"),
++      V8AtomicString(isolate, "arguments"),
++      V8AtomicString(isolate, "caller"),
++  };
++  v8::Local<v8::Array> prop_names;
++  if (original_fn->GetOwnPropertyNames(context).ToLocal(&prop_names)) {
++    for (uint32_t i = 0; i < prop_names->Length(); i++) {
++      v8::Local<v8::Value> key;
++      if (!prop_names->Get(context, i).ToLocal(&key))
++        continue;
++      bool skip = false;
++      for (const auto& s : skip_props) {
++        if (key->StrictEquals(s)) {
++          skip = true;
++          break;
++        }
++      }
++      if (skip)
++        continue;
++      v8::Local<v8::Value> val;
++      if (original_fn->Get(context, key).ToLocal(&val)) {
++        wrapper->Set(context, key, val).FromMaybe(false);
++      }
++    }
++  }
++
++  return global->Set(context, name_str, wrapper).FromMaybe(false);
++}
++
+ // Install Math function overrides.
+ void InstallMathOverrides(v8::Isolate* isolate,
+                           v8::Local<v8::Context> context) {
+@@ -185,6 +416,14 @@ void InstallMathOverrides(v8::Isolate* isolate,
+ void InstallDateOverrides(v8::Isolate* isolate,
+                           v8::Local<v8::Context> context) {
+   v8::Local<v8::Object> global = context->Global();
++
++  // Wrap the Date constructor first (Pattern X). This replaces window.Date
++  // with a wrapper that copies all original properties. Static method wrappers
++  // below then operate on the new wrapper.
++  WrapConstructorOnGlobal(isolate, context, global, "Date", "date",
++                          "constructorOverride");
++
++  // Re-fetch Date (now the wrapper with copied properties).
+   v8::Local<v8::Value> date_val;
+   if (!global->Get(context, V8AtomicString(isolate, "Date"))
+            .ToLocal(&date_val) ||
+@@ -193,7 +432,7 @@ void InstallDateOverrides(v8::Isolate* isolate,
+   }
+   v8::Local<v8::Object> date = date_val.As<v8::Object>();
+ 
+-  // Static methods on Date itself.
++  // Static methods on Date (the wrapper).
+   static const struct {
+     const char* fn_name;
+     const char* override_name;
+@@ -208,7 +447,7 @@ void InstallDateOverrides(v8::Isolate* isolate,
+                          fn.override_name);
+   }
+ 
+-  // Prototype methods on Date.prototype.
++  // Prototype methods on Date.prototype (shared between original and wrapper).
+   v8::Local<v8::Value> proto_val;
+   if (!date->Get(context, V8AtomicString(isolate, "prototype"))
+            .ToLocal(&proto_val) ||
+@@ -228,12 +467,66 @@ void InstallDateOverrides(v8::Isolate* isolate,
+       {"toLocaleString", "toLocaleStringOverride"},
+       {"toLocaleDateString", "toLocaleDateStringOverride"},
+       {"toLocaleTimeString", "toLocaleTimeStringOverride"},
++      {"valueOf", "valueOfOverride"},
+   };
+ 
+   for (const auto& fn : kDateProtoFns) {
+     WrapFunctionOnObject(isolate, context, proto, fn.fn_name, "date",
+                          fn.override_name);
+   }
++
++  // Wrap Symbol.toPrimitive on prototype.
++  WrapSymbolFunctionOnObject(isolate, context, proto,
++                             v8::Symbol::GetToPrimitive(isolate),
++                             "[Symbol.toPrimitive]", "date",
++                             "toPrimitiveOverride");
++}
++
++// Install Function.prototype.toString override.
++void InstallFunctionOverrides(v8::Isolate* isolate,
++                              v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Value> function_val;
++  if (!global->Get(context, V8AtomicString(isolate, "Function"))
++           .ToLocal(&function_val) ||
++      !function_val->IsFunction()) {
++    return;
++  }
++  v8::Local<v8::Value> proto_val;
++  if (!function_val.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, "prototype"))
++           .ToLocal(&proto_val) ||
++      !proto_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Object> proto = proto_val.As<v8::Object>();
++
++  WrapFunctionOnObject(isolate, context, proto, "toString", "function",
++                       "toStringOverride");
++}
++
++// Install constructor wrappers (Pattern X) for Error types, Notification, etc.
++void InstallConstructorOverrides(v8::Isolate* isolate,
++                                 v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++
++  static const struct {
++    const char* ctor_name;
++    const char* interface_key;
++    const char* override_name;
++  } kCtors[] = {
++      {"Error", "error", "constructorOverride"},
++      {"TypeError", "error", "typeErrorConstructorOverride"},
++      {"RangeError", "error", "rangeErrorConstructorOverride"},
++      {"SyntaxError", "error", "syntaxErrorConstructorOverride"},
++      {"Notification", "notification", "constructorOverride"},
++      {"FontFace", "fontFace", "constructorOverride"},
++  };
++
++  for (const auto& ctor : kCtors) {
++    WrapConstructorOnGlobal(isolate, context, global, ctor.ctor_name,
++                            ctor.interface_key, ctor.override_name);
++  }
+ }
+ 
+ }  // namespace
+@@ -247,6 +540,8 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+ 
+   InstallMathOverrides(isolate, context);
+   InstallDateOverrides(isolate, context);
++  InstallFunctionOverrides(isolate, context);
++  InstallConstructorOverrides(isolate, context);
+ }
+ 
+ }  // namespace blink
