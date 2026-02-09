@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 06:01:40 +0530
+Subject: Fix static property forwarding and symbol wrapping in
+ v8_builtin_overrides
+
+WrapConstructorOnGlobal was copying static non-function properties
+(e.g. Notification.maxActions, Notification.permission) using Get+Set,
+which evaluated native V8 getters once and stored the result as a plain
+data property. Subsequent accesses returned the cached value instead of
+invoking the C++ ForBinding method. Fix by installing a forwarding
+native data property getter that proxies to the original constructor.
+
+WrapSymbolFunctionOnObject was using target->Set() to install the
+wrapper, but properties like Date.prototype[Symbol.toPrimitive] have
+writable:false, causing Set() to silently fail. Fix by using
+DefineProperty with a PropertyDescriptor, which works because the
+property is configurable.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 318cf2d982091aef1caaf0cb57fbe7dc8a9bc3eb..50b8696445f5176efcf3d24827f116283a513b57 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -292,7 +292,29 @@ bool WrapSymbolFunctionOnObject(v8::Isolate* isolate,
+   }
+ 
+   wrapper->SetName(V8AtomicString(isolate, display_name));
+-  return target->Set(context, symbol_key, wrapper).FromMaybe(false);
++  // Use DefineOwnProperty instead of Set because some symbol-keyed properties
++  // (e.g. Date.prototype[Symbol.toPrimitive]) have writable:false, which
++  // causes Set() to silently fail. DefineOwnProperty works as long as the
++  // property is configurable.
++  v8::PropertyDescriptor desc(wrapper, true);  // writable: true
++  return target->DefineProperty(context, symbol_key, desc).FromMaybe(false);
++}
++
++// Forwarding getter for static properties on wrapped constructors.
++// When a constructor is wrapped (Pattern X), non-function static properties
++// (like Notification.maxActions) must forward to the original constructor
++// so that native V8 getters are invoked each time, rather than caching
++// the value as a plain data property.
++void StaticPropertyForwardGetter(
++    v8::Local<v8::Name> property,
++    const v8::PropertyCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++  v8::Local<v8::Function> original = info.Data().As<v8::Function>();
++  v8::Local<v8::Value> val;
++  if (original->Get(context, property).ToLocal(&val)) {
++    info.GetReturnValue().Set(val);
++  }
+ }
+ 
+ // Wraps a constructor on the global object (Pattern X).
+@@ -377,7 +399,21 @@ bool WrapConstructorOnGlobal(v8::Isolate* isolate,
+         continue;
+       v8::Local<v8::Value> val;
+       if (original_fn->Get(context, key).ToLocal(&val)) {
+-        wrapper->Set(context, key, val).FromMaybe(false);
++        if (val->IsFunction()) {
++          // Static methods: copy the function directly.
++          wrapper->Set(context, key, val).FromMaybe(false);
++        } else {
++          // Non-function static properties (e.g. Notification.maxActions,
++          // Notification.permission) may have native V8 getters that need
++          // to be invoked on each access. Install a forwarding getter that
++          // proxies to the original constructor instead of copying the
++          // current value as a frozen data property.
++          wrapper
++              ->SetNativeDataProperty(context, key.As<v8::Name>(),
++                                      StaticPropertyForwardGetter, nullptr,
++                                      original_fn)
++              .FromMaybe(false);
++        }
+       }
+     }
+   }
