@@ -18,7 +18,7 @@ DefineProperty with a PropertyDescriptor, which works because the
 property is configurable.
 
 diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
-index 318cf2d982091aef1caaf0cb57fbe7dc8a9bc3eb..50b8696445f5176efcf3d24827f116283a513b57 100644
+index 318cf2d982091aef1caaf0cb57fbe7dc8a9bc3eb..0a1fce83ab3ad80b1bef7bc3abd658a895144dd5 100644
 --- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
 +++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
 @@ -292,7 +292,29 @@ bool WrapSymbolFunctionOnObject(v8::Isolate* isolate,
@@ -75,3 +75,17 @@ index 318cf2d982091aef1caaf0cb57fbe7dc8a9bc3eb..50b8696445f5176efcf3d24827f11628
        }
      }
    }
+@@ -1360,6 +1396,13 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::Local<v8::Context> context = script_state->GetContext();
+ 
++  // V8 debug builds require a MicrotasksScope for API calls like Set().
++  // This function is called during context initialization from
++  // LocalWindowProxy::Initialize(), which may not have one active.
++  v8::MicrotasksScope microtasks_scope(
++      isolate, context->GetMicrotaskQueue(),
++      v8::MicrotasksScope::kDoNotRunMicrotasks);
++
+   InstallMathOverrides(isolate, context);
+   InstallDateOverrides(isolate, context);
+   InstallFunctionOverrides(isolate, context);
