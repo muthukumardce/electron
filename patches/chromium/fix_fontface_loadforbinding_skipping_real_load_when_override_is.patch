@@ -1,0 +1,25 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 06:20:34 +0530
+Subject: Fix FontFace.loadForBinding skipping real load when override is
+ present
+
+When a loadOverride is registered, skip calling the real load() method
+to avoid triggering a sandbox DCHECK failure (CanLoadInProcess) in
+renderer processes on macOS. Return the FontStatusPromise directly
+instead, which is the same promise load() would return.
+
+diff --git a/third_party/blink/renderer/core/css/font_face.cc b/third_party/blink/renderer/core/css/font_face.cc
+index ae5992de6e48a5c81b1cad7456a3484652efb692..17ef384c293307769516f5ff283fefb9795d8892 100644
+--- a/third_party/blink/renderer/core/css/font_face.cc
++++ b/third_party/blink/renderer/core/css/font_face.cc
+@@ -610,6 +610,9 @@ ScriptPromise<FontFace> FontFace::loadForBinding(ScriptState* script_state) {
+                      nullptr)
+               .ToLocal(&override_result)) {
+       }
++      // Skip the real font load to avoid triggering sandbox DCHECK
++      // failures in renderer processes (CanLoadInProcess check).
++      return FontStatusPromise(script_state);
+     }
+   }
+   return load(script_state);
