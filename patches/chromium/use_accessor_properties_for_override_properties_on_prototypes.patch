@@ -1,0 +1,188 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 08:11:34 +0530
+Subject: Use accessor properties for override properties on prototypes
+
+InstallOverrideProperty used SetNativeDataProperty to add properties
+like globalPrivacyControl, mozConnection, webkitConnection to
+Navigator.prototype. This creates data properties, but native browser
+properties are accessor properties with get/set descriptors. Prototype
+lie detectors check that accessing the property on the prototype throws
+TypeError (native getter behavior) and that the getter is a native
+function.
+
+Add InstallOverrideAccessorProperty which installs a proper accessor
+property with a FunctionTemplate+RemovePrototype getter that:
+- Throws TypeError("Illegal invocation") when called on the prototype
+- Has correct "get propName" naming matching native accessors
+- Passes all prototype lie detection checks
+
+Keep InstallOverrideProperty for non-prototype targets (Error, process.env)
+where data property semantics are appropriate.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 67099b321e5dcaf34a1112d8f8ecf3ae0ffde7fc..b2365cfad4c71262973146a8b5605b7e8ac0b650 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -914,11 +914,75 @@ static void InstallPostMessageOverrides(v8::Isolate* isolate,
+   }
+ }
+ 
+-// Batch 20: Override property getter callback.
+-// Used for adding new properties whose values come from customOverrides.
+-// data array: [interface_key_string, override_name_string]
+-void OverridePropertyGetter(v8::Local<v8::Name> property,
+-                             const v8::PropertyCallbackInfo<v8::Value>& info) {
++// Batch 20: Override property accessor getter callback (FunctionCallbackInfo).
++// Used for adding new accessor properties whose values come from
++// customOverrides. Throws TypeError when called on the prototype itself
++// (matching native accessor behavior).
++// data array: [interface_key, override_name, target_prototype]
++void OverridePropertyAccessorGetter(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++
++  v8::Local<v8::Array> data = info.Data().As<v8::Array>();
++
++  // Throw TypeError if called on the prototype (matches native getter behavior
++  // like navigator.connection accessed on Navigator.prototype).
++  v8::Local<v8::Value> target_proto =
++      data->Get(context, 2u).ToLocalChecked();
++  if (info.This()->StrictEquals(target_proto)) {
++    isolate->ThrowException(v8::Exception::TypeError(
++        V8AtomicString(isolate, "Illegal invocation")));
++    return;
++  }
++
++  v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::String> iface_key =
++      data->Get(context, 0u).ToLocalChecked().As<v8::String>();
++  v8::Local<v8::String> override_name =
++      data->Get(context, 1u).ToLocalChecked().As<v8::String>();
++
++  v8::Local<v8::Value> co_val;
++  if (!global
++           ->Get(context, V8AtomicString(isolate, "customOverrides"))
++           .ToLocal(&co_val) ||
++      !co_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Value> iface_val;
++  if (!co_val.As<v8::Object>()
++           ->Get(context, iface_key)
++           .ToLocal(&iface_val) ||
++      !iface_val->IsObject()) {
++    return;
++  }
++  v8::Local<v8::Value> override_val;
++  if (!iface_val.As<v8::Object>()
++           ->Get(context, override_name)
++           .ToLocal(&override_val) ||
++      override_val->IsUndefined()) {
++    return;
++  }
++
++  if (override_val->IsFunction()) {
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::Value> result;
++    if (override_val.As<v8::Function>()
++            ->Call(context, v8::Undefined(isolate), 0, nullptr)
++            .ToLocal(&result) &&
++        !result->IsUndefined()) {
++      info.GetReturnValue().Set(result);
++    }
++  } else {
++    info.GetReturnValue().Set(override_val);
++  }
++}
++
++// Native data property getter for non-prototype targets (e.g. Error,
++// process.env). data array: [interface_key, override_name]
++void OverrideDataPropertyGetter(
++    v8::Local<v8::Name> property,
++    const v8::PropertyCallbackInfo<v8::Value>& info) {
+   v8::Isolate* isolate = info.GetIsolate();
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+   v8::Local<v8::Object> global = context->Global();
+@@ -965,7 +1029,48 @@ void OverridePropertyGetter(v8::Local<v8::Name> property,
+   }
+ }
+ 
++// Installs an accessor property on a prototype, with a native-looking getter
++// (FunctionTemplate + RemovePrototype). The getter throws TypeError when called
++// on the prototype itself, matching native Chromium accessor behavior.
++bool InstallOverrideAccessorProperty(v8::Isolate* isolate,
++                                      v8::Local<v8::Context> context,
++                                      v8::Local<v8::Object> target,
++                                      const char* prop_name,
++                                      const char* interface_key,
++                                      const char* override_name) {
++  v8::Local<v8::Value> data_items[] = {
++      V8AtomicString(isolate, interface_key),
++      V8AtomicString(isolate, override_name),
++      target,  // Store prototype for TypeError check
++  };
++  v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 3);
++
++  v8::Local<v8::FunctionTemplate> getter_tmpl = v8::FunctionTemplate::New(
++      isolate, OverridePropertyAccessorGetter, data,
++      v8::Local<v8::Signature>(), 0);
++  getter_tmpl->RemovePrototype();
++  v8::Local<v8::Function> getter;
++  if (!getter_tmpl->GetFunction(context).ToLocal(&getter)) {
++    return false;
++  }
++
++  // Name the getter "get propName" to match native accessor naming.
++  v8::Local<v8::String> getter_name = v8::String::Concat(
++      isolate, V8AtomicString(isolate, "get "),
++      V8AtomicString(isolate, prop_name));
++  getter->SetName(getter_name);
++
++  v8::PropertyDescriptor desc(getter, v8::Undefined(isolate));
++  desc.set_enumerable(true);
++  desc.set_configurable(true);
++  return target
++      ->DefineProperty(context, V8AtomicString(isolate, prop_name), desc)
++      .FromMaybe(false);
++}
++
+ // Installs a native data property backed by an override getter.
++// Used for non-prototype targets (Error, process.env) where accessor
++// property semantics aren't needed.
+ bool InstallOverrideProperty(v8::Isolate* isolate,
+                               v8::Local<v8::Context> context,
+                               v8::Local<v8::Object> target,
+@@ -979,7 +1084,7 @@ bool InstallOverrideProperty(v8::Isolate* isolate,
+   v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 2);
+   return target
+       ->SetNativeDataProperty(context, V8AtomicString(isolate, prop_name),
+-                               OverridePropertyGetter, nullptr, data,
++                               OverrideDataPropertyGetter, nullptr, data,
+                                v8::None)
+       .FromMaybe(false);
+ }
+@@ -1180,13 +1285,15 @@ void InstallBatch20Overrides(v8::Isolate* isolate,
+               .ToLocal(&proto_val) &&
+           proto_val->IsObject()) {
+         v8::Local<v8::Object> proto = proto_val.As<v8::Object>();
+-        InstallOverrideProperty(isolate, context, proto,
+-                                 "globalPrivacyControl", "navigator",
+-                                 "globalPrivacyControlOverride");
+-        InstallOverrideProperty(isolate, context, proto, "mozConnection",
+-                                 "navigator", "mozConnectionOverride");
+-        InstallOverrideProperty(isolate, context, proto, "webkitConnection",
+-                                 "navigator", "webkitConnectionOverride");
++        InstallOverrideAccessorProperty(isolate, context, proto,
++                                        "globalPrivacyControl", "navigator",
++                                        "globalPrivacyControlOverride");
++        InstallOverrideAccessorProperty(isolate, context, proto,
++                                        "mozConnection", "navigator",
++                                        "mozConnectionOverride");
++        InstallOverrideAccessorProperty(isolate, context, proto,
++                                        "webkitConnection", "navigator",
++                                        "webkitConnectionOverride");
+       }
+     }
+   }
