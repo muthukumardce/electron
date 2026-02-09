@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 06:50:06 +0530
+Subject: Use FunctionTemplate with RemovePrototype for Pattern V wrappers
+
+v8::Function::New() creates functions with a .prototype property and
+makes them constructable, unlike native methods which have neither.
+Prototype lie detectors (e.g. CreepJS) check for these properties to
+detect function wrapping.
+
+Switch all non-constructor wrapper creation (WrapFunctionOnObject,
+WrapSymbolFunctionOnObject, InstallOverrideFunction, WrapGetterOnPrototype)
+to use v8::FunctionTemplate with RemovePrototype(), which removes the
+.prototype property and makes the wrapper non-constructable (throws
+TypeError on `new`), matching native method behavior exactly.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 0a1fce83ab3ad80b1bef7bc3abd658a895144dd5..67099b321e5dcaf34a1112d8f8ecf3ae0ffde7fc 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -243,9 +243,15 @@ bool WrapFunctionOnObject(v8::Isolate* isolate,
+     fn_length = length_val.As<v8::Int32>()->Value();
+   }
+ 
++  // Use FunctionTemplate with RemovePrototype() so the wrapper behaves like
++  // a native method: no .prototype property, non-constructable (throws
++  // TypeError on `new`), and only has 'length' and 'name' own properties.
++  v8::Local<v8::FunctionTemplate> tmpl = v8::FunctionTemplate::New(
++      isolate, GenericBuiltinWrapper, data, v8::Local<v8::Signature>(),
++      fn_length);
++  tmpl->RemovePrototype();
+   v8::Local<v8::Function> wrapper;
+-  if (!v8::Function::New(context, GenericBuiltinWrapper, data, fn_length)
+-           .ToLocal(&wrapper)) {
++  if (!tmpl->GetFunction(context).ToLocal(&wrapper)) {
+     return false;
+   }
+ 
+@@ -285,9 +291,14 @@ bool WrapSymbolFunctionOnObject(v8::Isolate* isolate,
+     fn_length = length_val.As<v8::Int32>()->Value();
+   }
+ 
++  // Use FunctionTemplate with RemovePrototype() so the wrapper behaves like
++  // a native method: no .prototype property and non-constructable.
++  v8::Local<v8::FunctionTemplate> tmpl = v8::FunctionTemplate::New(
++      isolate, GenericBuiltinWrapper, data, v8::Local<v8::Signature>(),
++      fn_length);
++  tmpl->RemovePrototype();
+   v8::Local<v8::Function> wrapper;
+-  if (!v8::Function::New(context, GenericBuiltinWrapper, data, fn_length)
+-           .ToLocal(&wrapper)) {
++  if (!tmpl->GetFunction(context).ToLocal(&wrapper)) {
+     return false;
+   }
+ 
+@@ -1037,9 +1048,12 @@ bool InstallOverrideFunction(v8::Isolate* isolate,
+       V8AtomicString(isolate, override_name),
+   };
+   v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 2);
++  v8::Local<v8::FunctionTemplate> tmpl = v8::FunctionTemplate::New(
++      isolate, GenericOverrideOnlyCallback, data, v8::Local<v8::Signature>(),
++      length);
++  tmpl->RemovePrototype();
+   v8::Local<v8::Function> fn;
+-  if (!v8::Function::New(context, GenericOverrideOnlyCallback, data, length)
+-           .ToLocal(&fn)) {
++  if (!tmpl->GetFunction(context).ToLocal(&fn)) {
+     return false;
+   }
+   fn->SetName(V8AtomicString(isolate, fn_name));
+@@ -1080,9 +1094,11 @@ bool WrapGetterOnPrototype(v8::Isolate* isolate,
+   };
+   v8::Local<v8::Array> data = v8::Array::New(isolate, data_items, 3);
+ 
++  v8::Local<v8::FunctionTemplate> tmpl = v8::FunctionTemplate::New(
++      isolate, GenericBuiltinWrapper, data, v8::Local<v8::Signature>(), 0);
++  tmpl->RemovePrototype();
+   v8::Local<v8::Function> wrapper;
+-  if (!v8::Function::New(context, GenericBuiltinWrapper, data, 0)
+-           .ToLocal(&wrapper)) {
++  if (!tmpl->GetFunction(context).ToLocal(&wrapper)) {
+     return false;
+   }
+ 

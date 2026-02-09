@@ -1,0 +1,26 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 06:39:00 +0530
+Subject: Fix font sandbox DCHECK crash in FontPlatformDataFromCTFont
+
+Replace DCHECK(CanLoadInProcess(ct_font)) with a graceful early return
+nullptr when the renderer sandbox prevents loading a font. This avoids
+a fatal crash when sites (e.g. CreepJS fonts test) create FontFace
+objects with local() sources and call .load() in the sandboxed renderer.
+
+diff --git a/third_party/blink/renderer/platform/fonts/mac/font_platform_data_mac.mm b/third_party/blink/renderer/platform/fonts/mac/font_platform_data_mac.mm
+index 16de85f64152e0bb755a1a77aa42099f25f4d260..034b0d00a0642c9f9f97eef6053fafb1456a66b5 100644
+--- a/third_party/blink/renderer/platform/fonts/mac/font_platform_data_mac.mm
++++ b/third_party/blink/renderer/platform/fonts/mac/font_platform_data_mac.mm
+@@ -125,7 +125,10 @@ static bool CanLoadInProcess(CTFontRef ct_font) {
+ 
+   // fontd automatically issues a sandbox extension to permit reading
+   // activated fonts that would otherwise be restricted by the sandbox.
+-  DCHECK(CanLoadInProcess(ct_font));
++  // In Electron, the renderer sandbox may prevent loading some fonts.
++  // Return nullptr instead of crashing so callers can handle gracefully.
++  if (!CanLoadInProcess(ct_font))
++    return nullptr;
+ 
+   sk_sp<SkTypeface> typeface = SkMakeTypefaceFromCTFont(ct_font);
+ 
