@@ -1,0 +1,40 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 9 Feb 2026 05:37:38 +0530
+Subject: Fix WebGL getSupportedExtensions override using wrong interface key
+
+The getSupportedExtensionsForBinding method in both webgl_rendering_context_base.cc
+and webgl_rendering_context_webgpu_base.cc was using "webgl" as the interface key
+when calling GetCustomOverrideFunction, but all other WebGL override hooks use
+"webglRenderingContext" as the interface key. This mismatch caused the override
+function to never be found, making getSupportedExtensions unoverridable.
+
+Changed the interface key from "webgl" to "webglRenderingContext" in both files
+to match the convention used by all other WebGL ForBinding methods.
+
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 60f3f8fbafe65a83319ddabc88f04b9899857297..4593c35269851de7e05b14d00cf152d370817ac5 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4419,7 +4419,7 @@ WebGLRenderingContextBase::getSupportedExtensionsForBinding(
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::HandleScope handle_scope(isolate);
+   v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
+-      script_state, "webgl", "getSupportedExtensionsOverride");
++      script_state, "webglRenderingContext", "getSupportedExtensionsOverride");
+   if (!override_fn.IsEmpty()) {
+     v8::Local<v8::Value> v8_value =
+         ToV8Traits<IDLNullable<IDLSequence<IDLString>>>::ToV8(script_state,
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+index 00a3ef8ce69578baf1aad1175446d89b0f6c668e..2b6cc2e2f83cca288bc6000b29e296940005c0dc 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+@@ -1338,7 +1338,7 @@ WebGLRenderingContextWebGPUBase::getSupportedExtensionsForBinding(
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::HandleScope handle_scope(isolate);
+   v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
+-      script_state, "webgl", "getSupportedExtensionsOverride");
++      script_state, "webglRenderingContext", "getSupportedExtensionsOverride");
+   if (!override_fn.IsEmpty()) {
+     v8::Local<v8::Value> v8_value =
+         ToV8Traits<IDLNullable<IDLSequence<IDLString>>>::ToV8(script_state,
