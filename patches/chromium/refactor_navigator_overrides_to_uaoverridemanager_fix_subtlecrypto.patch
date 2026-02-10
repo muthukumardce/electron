@@ -1,0 +1,1168 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Tue, 10 Feb 2026 11:58:19 +0530
+Subject: Refactor navigator overrides to UAOverrideManager, fix SubtleCrypto
+ and EventTarget
+
+Navigator overrides (UA, platform, language, hardwareConcurrency, deviceMemory,
+onLine) migrated from per-call JS override lookups via GetCustomOverrideFunction
++ V8ScriptRunner::CallFunction to pre-stored values in UAOverrideManager. This
+eliminates V8 round-trips on every property access and enables consistent
+overrides across workers and shared workers.
+
+Changes per file:
+
+  navigator_ua_data.idl/h/cc:
+  - Extended UAOverrideValues dictionary and UAOverrideValues_Storage with
+    navigator-level fields: userAgent, navigatorPlatform, language, languages,
+    onLine, hardwareConcurrency, deviceMemory
+  - Added SetFallbackStorage() for shared workers with different cluster IDs
+  - GetStorageForCluster() now falls back to process-wide default when no
+    cluster-specific override exists or cluster ID is empty
+  - Replaced thread_local brand cache with member field cached_override_brands_
+  - Simplified brandsForBinding/platformForBinding to delegate to non-binding
+    methods (which already read from UAOverrideManager)
+
+  navigator_base.cc:
+  - Removed V8ScriptRunner-based userAgent override, now returns raw UA
+    (override applied via UAOverrideManager in NavigatorID::userAgentForBinding)
+  - onLineForBinding reads from UAOverrideManager storage
+
+  navigator_id.cc:
+  - appVersionForBinding, platformForBinding, userAgentForBinding now read
+    from UAOverrideManager instead of calling JS override functions
+  - Removed local MaybeStringOverride helper
+
+  navigator_language.cc:
+  - languageForBinding, languagesForBinding read from UAOverrideManager
+  - Removed local MaybeStringOverride helper and V8ScriptRunner includes
+
+  navigator_concurrent_hardware.cc:
+  - hardwareConcurrencyForBinding reads from UAOverrideManager
+  - Removed local MaybeUnsignedOverride helper
+
+  navigator_device_memory.cc:
+  - deviceMemoryForBinding reads from UAOverrideManager
+  - Removed local MaybeFloatOverride helper
+
+  event_target.cc:
+  - Guard addEventListener override check with !ScriptForbiddenScope to prevent
+    crash during SVG shadow tree cloning where scripts are forbidden
+  - Add v8::MicrotasksScope::kDoNotRunMicrotasks to prevent V8 fatal error
+    when called from HTML parser (SetAttributeEventListener path) with no
+    V8 frames on the stack
+
+  subtle_crypto.cc:
+  - Replaced MaybeSubtleCryptoOverride (which called override with 0 args and
+    replaced the entire crypto operation with the override's return value) with
+    MaybeChainSubtleCryptoOverride (which chains override as .then() handler
+    on the real crypto promise, so the override receives the actual resolved
+    value and can inspect/modify it)
+  - Removed early-return override checks from all 12 SubtleCrypto methods
+  - Each method now runs the real crypto operation first, then chains the
+    override via v8::Promise::Then() before returning
+
+diff --git a/third_party/blink/renderer/core/dom/events/event_target.cc b/third_party/blink/renderer/core/dom/events/event_target.cc
+index 4a19cd24090baede97302b039e4a8193d2a43426..45540d09ea4bed2e2288b95d3863e188b1fcb131 100644
+--- a/third_party/blink/renderer/core/dom/events/event_target.cc
++++ b/third_party/blink/renderer/core/dom/events/event_target.cc
+@@ -67,6 +67,7 @@
+ #include "third_party/blink/renderer/core/scheduler/task_attribution_util.h"
+ #include "third_party/blink/renderer/core/workers/worker_or_worklet_global_scope.h"
+ #include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "v8/include/v8-microtask-queue.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_forbidden_scope.h"
+@@ -599,6 +600,8 @@ bool EventTarget::AddEventListenerInternal(
+     return false;
+ 
+   // Custom override: allow JS to intercept/block addEventListener by event type.
++  // Skip when scripts are forbidden (e.g. during SVG shadow tree cloning).
++  if (!ScriptForbiddenScope::IsScriptForbidden()) {
+   if (auto* window = DynamicTo<LocalDOMWindow>(execution_context)) {
+     if (LocalFrame* frame = window->GetFrame()) {
+       ScriptState* script_state = ToScriptStateForMainWorld(frame);
+@@ -611,6 +614,13 @@ bool EventTarget::AddEventListenerInternal(
+                                       "addEventListenerOverride");
+         if (!override_fn.IsEmpty()) {
+           v8::Local<v8::Context> ctx = script_state->GetContext();
++          // Suppress microtask checkpoint — this can be called from the HTML
++          // parser (SetAttributeEventListener → ParseAttribute) where no V8
++          // frames are on the stack. Without this scope, CallDepthScope's
++          // destructor triggers a microtask checkpoint that hits a V8 fatal.
++          v8::MicrotasksScope microtasks_scope(
++              isolate, ctx->GetMicrotaskQueue(),
++              v8::MicrotasksScope::kDoNotRunMicrotasks);
+           v8::Local<v8::Value> argv[] = {V8String(isolate, event_type)};
+           v8::TryCatch try_catch(isolate);
+           v8::Local<v8::Value> result;
+@@ -623,6 +633,7 @@ bool EventTarget::AddEventListenerInternal(
+       }
+     }
+   }
++  }  // !ScriptForbiddenScope
+ 
+   // Unload/Beforeunload handlers are not allowed in fenced frames.
+   if (event_type == event_type_names::kUnload ||
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index 08c0f1f73df42d91913fa97aefcb8e5b6610ecb2..6bf6754a8697fb9cb4e5e3ae641ebb19066ffc48 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -7,15 +7,12 @@
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+-#include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+-#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+-#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/core/geolocation/geolocation.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+-#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+ 
+ #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_WIN)
+@@ -53,41 +50,7 @@ NavigatorBase::NavigatorBase(ExecutionContext* context)
+ 
+ String NavigatorBase::userAgent(ScriptState* script_state) const {
+   ExecutionContext* execution_context = GetExecutionContext();
+-  String user_agent = execution_context ? execution_context->UserAgent() : String();
+-
+-  if (!script_state || !script_state->ContextIsValid() || !execution_context) {
+-    return user_agent;
+-  }
+-
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  ScriptState::Scope scope(script_state);
+-
+-  v8::Local<v8::Function> override_fn =
+-      GetCustomOverrideFunction(script_state, "navigator", "userAgentOverride");
+-  if (override_fn.IsEmpty()) {
+-    return user_agent;
+-  }
+-
+-  v8::Local<v8::Context> context = script_state->GetContext();
+-  v8::Local<v8::Value> argv[] = {V8String(isolate, user_agent)};
+-  v8::Local<v8::Value> override_result;
+-  if (!V8ScriptRunner::CallFunction(
+-           override_fn, execution_context,
+-           context->Global(), 1, argv, isolate)
+-           .ToLocal(&override_result)) {
+-    return user_agent;
+-  }
+-
+-  if (override_result->IsNullOrUndefined()) {
+-    return user_agent;
+-  }
+-
+-  v8::Local<v8::String> override_string;
+-  if (!override_result->ToString(context).ToLocal(&override_string)) {
+-    return user_agent;
+-  }
+-  return ToCoreString(isolate, override_string);
++  return execution_context ? execution_context->UserAgent() : String();
+ }
+ 
+ String NavigatorBase::platform() const {
+@@ -156,9 +119,18 @@ UserAgentMetadata NavigatorBase::GetUserAgentMetadata() const {
+ }
+ 
+ bool NavigatorOnLine::onLineForBinding(ScriptState* script_state) {
+-  bool result = onLine();
+-  return MaybeBoolOverride(script_state, "navigator",
+-                           "onLineOverride", result);
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_on_line.has_value()) {
++        return storage->override_on_line.value();
++      }
++    }
++  }
++  return onLine();
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+index 2b9e9844b15d4879a7ac26d1810dbfca95972f75..1463a46e5c1d8e1fc86fbeb50027689d5dcd17ae 100644
+--- a/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
++++ b/third_party/blink/renderer/core/frame/navigator_concurrent_hardware.cc
+@@ -5,9 +5,8 @@
+ #include "third_party/blink/renderer/core/frame/navigator_concurrent_hardware.h"
+ 
+ #include "base/system/sys_info.h"
+-#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+-#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ 
+ namespace blink {
+ 
+@@ -15,44 +14,20 @@ unsigned NavigatorConcurrentHardware::hardwareConcurrency() const {
+   return static_cast<unsigned>(base::SysInfo::NumberOfProcessors());
+ }
+ 
+-namespace {
+-unsigned MaybeUnsignedOverride(ScriptState* script_state,
+-                               unsigned value,
+-                               const char* interface_key,
+-                               const char* override_name) {
+-  if (!script_state || !script_state->ContextIsValid())
+-    return value;
+-
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  ScriptState::Scope scope(script_state);
+-
+-  v8::Local<v8::Function> override_fn =
+-      GetCustomOverrideFunction(script_state, interface_key, override_name);
+-  if (override_fn.IsEmpty())
+-    return value;
+-
+-  v8::Local<v8::Context> context = script_state->GetContext();
+-  v8::Local<v8::Value> argv[] = {
+-      v8::Number::New(isolate, static_cast<double>(value))};
+-  v8::TryCatch try_catch(isolate);
+-  v8::Local<v8::Value> override_result;
+-  if (!V8ScriptRunner::CallFunction(
+-           override_fn, ExecutionContext::From(script_state),
+-           context->Global(), 1, argv, isolate)
+-           .ToLocal(&override_result))
+-    return value;
+-
+-  if (override_result->IsNumber())
+-    return static_cast<unsigned>(override_result.As<v8::Number>()->Value());
+-  return value;
+-}
+-}  // namespace
+-
+ unsigned NavigatorConcurrentHardware::hardwareConcurrencyForBinding(
+     ScriptState* script_state) const {
+-  return MaybeUnsignedOverride(script_state, hardwareConcurrency(), "navigator",
+-                               "hardwareConcurrencyOverride");
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_hardware_concurrency.has_value()) {
++        return storage->override_hardware_concurrency.value();
++      }
++    }
++  }
++  return hardwareConcurrency();
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_device_memory.cc b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+index 59b4849f4834d924d045f153eb06ee518e9db1a6..8cd6af0e07b3bf8c7c0f73333299c37ba5e65951 100644
+--- a/third_party/blink/renderer/core/frame/navigator_device_memory.cc
++++ b/third_party/blink/renderer/core/frame/navigator_device_memory.cc
+@@ -5,11 +5,8 @@
+ #include "third_party/blink/renderer/core/frame/navigator_device_memory.h"
+ 
+ #include "third_party/blink/public/common/device_memory/approximated_device_memory.h"
+-#include "third_party/blink/public/mojom/use_counter/metrics/web_feature.mojom-shared.h"
+-#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+-#include "third_party/blink/renderer/core/dom/document.h"
+-#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+-#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ 
+ namespace blink {
+ 
+@@ -17,44 +14,20 @@ float NavigatorDeviceMemory::deviceMemory() const {
+   return ApproximatedDeviceMemory::GetApproximatedDeviceMemory();
+ }
+ 
+-namespace {
+-float MaybeFloatOverride(ScriptState* script_state,
+-                         float value,
+-                         const char* interface_key,
+-                         const char* override_name) {
+-  if (!script_state || !script_state->ContextIsValid())
+-    return value;
+-
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  ScriptState::Scope scope(script_state);
+-
+-  v8::Local<v8::Function> override_fn =
+-      GetCustomOverrideFunction(script_state, interface_key, override_name);
+-  if (override_fn.IsEmpty())
+-    return value;
+-
+-  v8::Local<v8::Context> context = script_state->GetContext();
+-  v8::Local<v8::Value> argv[] = {
+-      v8::Number::New(isolate, static_cast<double>(value))};
+-  v8::TryCatch try_catch(isolate);
+-  v8::Local<v8::Value> override_result;
+-  if (!V8ScriptRunner::CallFunction(
+-           override_fn, ExecutionContext::From(script_state),
+-           context->Global(), 1, argv, isolate)
+-           .ToLocal(&override_result))
+-    return value;
+-
+-  if (override_result->IsNumber())
+-    return static_cast<float>(override_result.As<v8::Number>()->Value());
+-  return value;
+-}
+-}  // namespace
+-
+ float NavigatorDeviceMemory::deviceMemoryForBinding(
+     ScriptState* script_state) const {
+-  return MaybeFloatOverride(script_state, deviceMemory(), "navigator",
+-                            "deviceMemoryOverride");
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_device_memory.has_value()) {
++        return storage->override_device_memory.value();
++      }
++    }
++  }
++  return deviceMemory();
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/navigator_id.cc b/third_party/blink/renderer/core/frame/navigator_id.cc
+index d72f0e5e5f559e3e73a9ae2fb35eab3eb4f66d4b..32b0c908db18a0fbf31df41ca3c2ed8f077fa979 100644
+--- a/third_party/blink/renderer/core/frame/navigator_id.cc
++++ b/third_party/blink/renderer/core/frame/navigator_id.cc
+@@ -34,10 +34,8 @@
+ #include "base/feature_list.h"
+ #include "build/build_config.h"
+ #include "third_party/blink/public/common/features.h"
+-#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+-#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+-#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+ 
+ #if !BUILDFLAG(IS_MAC) && !BUILDFLAG(IS_WIN)
+@@ -48,42 +46,6 @@
+ 
+ namespace blink {
+ 
+-namespace {
+-String MaybeStringOverride(ScriptState* script_state,
+-                           const String& value,
+-                           const char* interface_key,
+-                           const char* override_name) {
+-  if (!script_state || !script_state->ContextIsValid())
+-    return value;
+-
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  ScriptState::Scope scope(script_state);
+-
+-  v8::Local<v8::Function> override_fn =
+-      GetCustomOverrideFunction(script_state, interface_key, override_name);
+-  if (override_fn.IsEmpty())
+-    return value;
+-
+-  v8::Local<v8::Context> context = script_state->GetContext();
+-  v8::Local<v8::Value> argv[] = {V8String(isolate, value)};
+-  v8::TryCatch try_catch(isolate);
+-  v8::Local<v8::Value> override_result;
+-  if (!V8ScriptRunner::CallFunction(
+-           override_fn, ExecutionContext::From(script_state),
+-           context->Global(), 1, argv, isolate)
+-           .ToLocal(&override_result))
+-    return value;
+-
+-  if (override_result->IsNullOrUndefined())
+-    return value;
+-  v8::Local<v8::String> override_string;
+-  if (!override_result->ToString(context).ToLocal(&override_string))
+-    return value;
+-  return ToCoreString(isolate, override_string);
+-}
+-}  // namespace
+-
+ String NavigatorID::appCodeName() {
+   return "Mozilla";
+ }
+@@ -124,18 +86,49 @@ String NavigatorID::platform() const {
+ }
+ 
+ String NavigatorID::appVersionForBinding(ScriptState* script_state) {
+-  return MaybeStringOverride(script_state, appVersion(), "navigator",
+-                             "appVersionOverride");
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_user_agent.has_value()) {
++        const String& agent = storage->override_user_agent.value();
++        return agent.Substring(agent.find('/') + 1);
++      }
++    }
++  }
++  return appVersion();
+ }
+ 
+ String NavigatorID::platformForBinding(ScriptState* script_state) const {
+-  return MaybeStringOverride(script_state, platform(), "navigator",
+-                             "platformOverride");
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_navigator_platform.has_value()) {
++        return storage->override_navigator_platform.value();
++      }
++    }
++  }
++  return platform();
+ }
+ 
+ String NavigatorID::userAgentForBinding(ScriptState* script_state) {
+-  return MaybeStringOverride(script_state, userAgent(script_state), "navigator",
+-                             "userAgentOverride");
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_user_agent.has_value()) {
++        return storage->override_user_agent.value();
++      }
++    }
++  }
++  return userAgent(script_state);
+ }
+ 
+ String NavigatorID::product() {
+diff --git a/third_party/blink/renderer/core/frame/navigator_language.cc b/third_party/blink/renderer/core/frame/navigator_language.cc
+index 89f591bbf312d5fa126b68c96780fda46608ec71..f333b2830a3db8db3967e31bb9f371cc092c2b00 100644
+--- a/third_party/blink/renderer/core/frame/navigator_language.cc
++++ b/third_party/blink/renderer/core/frame/navigator_language.cc
+@@ -7,11 +7,10 @@
+ #include "base/command_line.h"
+ #include "services/network/public/cpp/features.h"
+ #include "third_party/blink/public/common/switches.h"
+-#include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/core/frame/web_feature.h"
+ #include "third_party/blink/renderer/core/probe/core_probes.h"
+-#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+-#include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "third_party/blink/renderer/platform/language.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_builder.h"
+ 
+@@ -40,79 +39,39 @@ Vector<String> ParseAndSanitize(const String& accept_languages) {
+ NavigatorLanguage::NavigatorLanguage(ExecutionContext* execution_context)
+     : execution_context_(execution_context) {}
+ 
+-namespace {
+-String MaybeStringOverride(ScriptState* script_state,
+-                           const String& value,
+-                           const char* interface_key,
+-                           const char* override_name) {
+-  if (!script_state || !script_state->ContextIsValid())
+-    return value;
+-
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  ScriptState::Scope scope(script_state);
+-
+-  v8::Local<v8::Function> override_fn =
+-      GetCustomOverrideFunction(script_state, interface_key, override_name);
+-  if (override_fn.IsEmpty())
+-    return value;
+-
+-  v8::Local<v8::Context> context = script_state->GetContext();
+-  v8::Local<v8::Value> argv[] = {V8String(isolate, value)};
+-  v8::TryCatch try_catch(isolate);
+-  v8::Local<v8::Value> override_result;
+-  if (!V8ScriptRunner::CallFunction(
+-           override_fn, ExecutionContext::From(script_state),
+-           context->Global(), 1, argv, isolate)
+-           .ToLocal(&override_result))
+-    return value;
+-
+-  if (override_result->IsNullOrUndefined())
+-    return value;
+-  v8::Local<v8::String> override_string;
+-  if (!override_result->ToString(context).ToLocal(&override_string))
+-    return value;
+-  return ToCoreString(isolate, override_string);
+-}
+-}  // namespace
+-
+ AtomicString NavigatorLanguage::language() {
+   return AtomicString(languages().front());
+ }
+ 
+ AtomicString NavigatorLanguage::languageForBinding(ScriptState* script_state) {
+-  return AtomicString(
+-      MaybeStringOverride(script_state, language(), "navigator",
+-                          "languageOverride"));
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_language.has_value()) {
++        return AtomicString(storage->override_language.value());
++      }
++    }
++  }
++  return language();
+ }
+ 
+ const Vector<String>& NavigatorLanguage::languagesForBinding(
+     ScriptState* script_state) {
+-  const Vector<String>& result = languages();
+-  if (!script_state || !script_state->ContextIsValid())
+-    return result;
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
+-      script_state, "navigator", "languagesOverride");
+-  if (!override_fn.IsEmpty()) {
+-    v8::Local<v8::Array> v8_array =
+-        v8::Array::New(isolate, static_cast<int>(result.size()));
+-    for (wtf_size_t i = 0; i < result.size(); ++i) {
+-      v8_array
+-          ->Set(script_state->GetContext(), i,
+-                V8String(isolate, result[i]))
+-          .Check();
+-    }
+-    v8::Local<v8::Value> args[] = {v8_array};
+-    v8::TryCatch try_catch(isolate);
+-    v8::Local<v8::Value> override_result;
+-    if (override_fn
+-            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
+-            .ToLocal(&override_result)) {
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_languages.has_value()) {
++        return storage->override_languages.value();
++      }
+     }
+   }
+-  return result;
++  return languages();
+ }
+ 
+ const Vector<String>& NavigatorLanguage::languages() {
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index e8aaedfb7019831e8f8ef3e1536333ae2095494c..8550d0d25af1a985c25d0c785b413e24f6c28cd6 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -40,6 +40,13 @@ void UAOverrideValues_Storage::Reset() {
+   override_bitness.reset();
+   override_wow64.reset();
+   override_form_factors.reset();
++  override_user_agent.reset();
++  override_navigator_platform.reset();
++  override_language.reset();
++  override_languages.reset();
++  override_on_line.reset();
++  override_hardware_concurrency.reset();
++  override_device_memory.reset();
+ }
+ 
+ // UAOverrideManager singleton - thread-safe for Service Worker access
+@@ -51,19 +58,34 @@ UAOverrideManager& UAOverrideManager::GetInstance() {
+ UAOverrideValues_Storage* UAOverrideManager::GetStorageForCluster(
+     const base::UnguessableToken& cluster_id) {
+   if (cluster_id.is_empty()) {
+-    return nullptr;
++    base::AutoLock auto_lock(lock_);
++    return fallback_storage_;
+   }
+   base::AutoLock auto_lock(lock_);
+   String key = String::FromUTF8(cluster_id.ToString());
+   auto it = storage_map_.find(key);
+-  if (it != storage_map_.end()) {
++  if (it != storage_map_.end() && it->value->has_override) {
+     return it->value.get();
+   }
+-  // Create new storage for this agent cluster
+-  auto storage = std::make_unique<UAOverrideValues_Storage>();
+-  UAOverrideValues_Storage* ptr = storage.get();
+-  storage_map_.insert(key, std::move(storage));
+-  return ptr;
++  // No cluster-specific overrides — fall back to process-wide default.
++  // This handles shared workers that have a different Agent cluster ID
++  // from the page that called setUA().
++  if (fallback_storage_) {
++    return fallback_storage_;
++  }
++  // No fallback either — create empty storage for this cluster
++  if (it == storage_map_.end()) {
++    auto storage = std::make_unique<UAOverrideValues_Storage>();
++    UAOverrideValues_Storage* ptr = storage.get();
++    storage_map_.insert(key, std::move(storage));
++    return ptr;
++  }
++  return it->value.get();
++}
++
++void UAOverrideManager::SetFallbackStorage(UAOverrideValues_Storage* storage) {
++  base::AutoLock auto_lock(lock_);
++  fallback_storage_ = storage;
+ }
+ 
+ void UAOverrideManager::ResetStorageForCluster(
+@@ -178,6 +200,7 @@ void NavigatorUAData::setUA(const UAOverrideValues* override_values) {
+   }
+ 
+   storage->has_override = true;
++  UAOverrideManager::GetInstance().SetFallbackStorage(storage);
+ 
+   // Override brands - store as pairs of strings
+   if (override_values->hasBrands()) {
+@@ -241,6 +264,29 @@ void NavigatorUAData::setUA(const UAOverrideValues* override_values) {
+   if (override_values->hasFormFactors()) {
+     storage->override_form_factors = override_values->formFactors();
+   }
++
++  // Navigator-level overrides
++  if (override_values->hasUserAgent()) {
++    storage->override_user_agent = override_values->userAgent();
++  }
++  if (override_values->hasNavigatorPlatform()) {
++    storage->override_navigator_platform = override_values->navigatorPlatform();
++  }
++  if (override_values->hasLanguage()) {
++    storage->override_language = override_values->language();
++  }
++  if (override_values->hasLanguages()) {
++    storage->override_languages = override_values->languages();
++  }
++  if (override_values->hasOnLine()) {
++    storage->override_on_line = override_values->onLine();
++  }
++  if (override_values->hasHardwareConcurrency()) {
++    storage->override_hardware_concurrency = override_values->hardwareConcurrency();
++  }
++  if (override_values->hasDeviceMemory()) {
++    storage->override_device_memory = override_values->deviceMemory();
++  }
+ }
+ 
+ HeapVector<Member<NavigatorUABrandVersion>> NavigatorUAData::BuildOverrideBrands(
+@@ -293,19 +339,16 @@ const HeapVector<Member<NavigatorUABrandVersion>>& NavigatorUAData::brands()
+     base::UnguessableToken cluster_id = GetExecutionContext()->GetAgentClusterID();
+     UAOverrideValues_Storage* storage =
+         UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
+-    // Return override brands if set - note: we need to cache this to return a reference
++    // Return override brands if set
+     if (storage && storage->has_override && !storage->override_brands.empty()) {
+-      // We need to build and cache override brands
+-      // For thread safety with reference return, store in thread-local
+-      thread_local HeapVector<Member<NavigatorUABrandVersion>> cached_override_brands;
+-      cached_override_brands.clear();
++      cached_override_brands_.clear();
+       for (const auto& pair : storage->override_brands) {
+         NavigatorUABrandVersion* dict = NavigatorUABrandVersion::Create();
+         dict->setBrand(pair.first);
+         dict->setVersion(pair.second);
+-        cached_override_brands.push_back(dict);
++        cached_override_brands_.push_back(dict);
+       }
+-      return cached_override_brands;
++      return cached_override_brands_;
+     }
+     return brand_set_;
+   }
+@@ -335,52 +378,16 @@ bool NavigatorUAData::mobileForBinding(ScriptState* script_state) const {
+ 
+ const HeapVector<Member<NavigatorUABrandVersion>>&
+ NavigatorUAData::brandsForBinding(ScriptState* script_state) const {
+-  const HeapVector<Member<NavigatorUABrandVersion>>& result = brands();
+-  if (!script_state || !script_state->ContextIsValid())
+-    return result;
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
+-      script_state, "navigatorUAData", "brandsOverride");
+-  if (!override_fn.IsEmpty()) {
+-    v8::Local<v8::Value> v8_value =
+-        ToV8Traits<IDLSequence<NavigatorUABrandVersion>>::ToV8(script_state,
+-                                                                result);
+-    v8::Local<v8::Value> args[] = {v8_value};
+-    v8::TryCatch try_catch(isolate);
+-    v8::Local<v8::Value> override_result;
+-    if (override_fn
+-            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
+-            .ToLocal(&override_result)) {
+-    }
+-  }
+-  return result;
++  // Overrides are handled via setUA() -> UAOverrideManager storage,
++  // which brands() already reads from.
++  return brands();
+ }
+ 
+ const String& NavigatorUAData::platformForBinding(
+     ScriptState* script_state) const {
+-  const String& result = platform();
+-  if (!script_state || !script_state->ContextIsValid())
+-    return result;
+-  v8::Isolate* isolate = script_state->GetIsolate();
+-  v8::HandleScope handle_scope(isolate);
+-  v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
+-      script_state, "navigatorUAData", "platformOverride");
+-  if (!override_fn.IsEmpty()) {
+-    v8::Local<v8::Value> args[] = {V8String(isolate, result)};
+-    v8::TryCatch try_catch(isolate);
+-    v8::Local<v8::Value> override_result;
+-    if (override_fn
+-            ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
+-            .ToLocal(&override_result)) {
+-      if (override_result->IsString()) {
+-        // platformForBinding returns a const reference to an internal member,
+-        // so we can't return a modified string here. The override is used
+-        // for notification only (Pattern D).
+-      }
+-    }
+-  }
+-  return result;
++  // Overrides are handled via setUA() -> UAOverrideManager storage,
++  // which platform() already reads from.
++  return platform();
+ }
+ 
+ bool AllowedToCollectHighEntropyValues(ExecutionContext* execution_context) {
+@@ -554,6 +561,7 @@ void NavigatorUAData::Trace(Visitor* visitor) const {
+   visitor->Trace(brand_set_);
+   visitor->Trace(full_version_list_);
+   visitor->Trace(empty_brand_set_);
++  visitor->Trace(cached_override_brands_);
+   ScriptWrappable::Trace(visitor);
+   ExecutionContextClient::Trace(visitor);
+ }
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.h b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+index 5f375ae7dec1015800c5b162382e0cbccf903c80..30ea2692a7528a7d34a6314772a6a233d94fcd77 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.h
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+@@ -40,6 +40,14 @@ struct UAOverrideValues_Storage {
+   std::optional<String> override_bitness;
+   std::optional<bool> override_wow64;
+   std::optional<Vector<String>> override_form_factors;
++  // Navigator-level overrides
++  std::optional<String> override_user_agent;
++  std::optional<String> override_navigator_platform;
++  std::optional<String> override_language;
++  std::optional<Vector<String>> override_languages;
++  std::optional<bool> override_on_line;
++  std::optional<unsigned> override_hardware_concurrency;
++  std::optional<float> override_device_memory;
+ 
+   void Reset();
+ };
+@@ -52,6 +60,7 @@ class CORE_EXPORT UAOverrideManager {
+ 
+   UAOverrideValues_Storage* GetStorageForCluster(const base::UnguessableToken& cluster_id);
+   void ResetStorageForCluster(const base::UnguessableToken& cluster_id);
++  void SetFallbackStorage(UAOverrideValues_Storage* storage);
+ 
+  private:
+   UAOverrideManager() = default;
+@@ -61,6 +70,10 @@ class CORE_EXPORT UAOverrideManager {
+ 
+   // Map from Agent cluster_id (as string) to its UA override storage
+   HashMap<String, std::unique_ptr<UAOverrideValues_Storage>> storage_map_ GUARDED_BY(lock_);
++
++  // Fallback for contexts with a different cluster ID (e.g. shared workers).
++  // Points to an entry owned by storage_map_.
++  UAOverrideValues_Storage* fallback_storage_ GUARDED_BY(lock_) = nullptr;
+ };
+ 
+ class NavigatorUAData : public ScriptWrappable, ExecutionContextClient {
+@@ -104,6 +117,7 @@ class NavigatorUAData : public ScriptWrappable, ExecutionContextClient {
+   HeapVector<Member<NavigatorUABrandVersion>> brand_set_;
+   HeapVector<Member<NavigatorUABrandVersion>> empty_brand_set_;
+   HeapVector<Member<NavigatorUABrandVersion>> full_version_list_;
++  mutable HeapVector<Member<NavigatorUABrandVersion>> cached_override_brands_;
+   bool is_mobile_ = false;
+   String platform_;
+   String platform_version_;
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.idl b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+index b41eb24dbb06519ca33ed77b179cb6ecd7a25939..251c31324890abca1c3288f88e21f44b5829abc9 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.idl
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+@@ -17,6 +17,14 @@ dictionary UAOverrideValues {
+   sequence<NavigatorUABrandVersion> fullVersionList;
+   boolean wow64;
+   sequence<DOMString> formFactors;
++  // Navigator-level overrides (shared across all worker types via Agent cluster)
++  DOMString userAgent;
++  DOMString navigatorPlatform;
++  DOMString language;
++  sequence<DOMString> languages;
++  boolean onLine;
++  unsigned long hardwareConcurrency;
++  float deviceMemory;
+ };
+ 
+ [Exposed=(Window,Worker)] interface NavigatorUAData {
+diff --git a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
+index 81d3890e4ca15371795030158337894c97e6f383..d236adbdf73095b37c429f428f20c9fa00a6642d 100644
+--- a/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
++++ b/third_party/blink/renderer/modules/crypto/subtle_crypto.cc
+@@ -117,12 +117,15 @@ bool ParseJsonWebKey(const JsonWebKey& key, std::vector<uint8_t>& json_utf8) {
+   return true;
+ }
+ 
++// Chains a .then() handler on a SubtleCrypto promise so the override receives
++// the resolved value and can inspect/modify it (Pattern F: post-resolution).
+ template <typename T>
+-std::optional<ScriptPromise<T>> MaybeSubtleCryptoOverride(
++ScriptPromise<T> MaybeChainSubtleCryptoOverride(
+     ScriptState* script_state,
++    ScriptPromise<T> promise,
+     const char* override_name) {
+   if (!script_state || !script_state->ContextIsValid())
+-    return std::nullopt;
++    return promise;
+ 
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::HandleScope handle_scope(isolate);
+@@ -131,33 +134,15 @@ std::optional<ScriptPromise<T>> MaybeSubtleCryptoOverride(
+   v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
+       script_state, "subtleCrypto", override_name);
+   if (override_fn.IsEmpty())
+-    return std::nullopt;
+-
+-  v8::Local<v8::Context> context = script_state->GetContext();
+-  v8::TryCatch try_catch(isolate);
+-  v8::Local<v8::Value> override_result;
+-  if (!V8ScriptRunner::CallFunction(
+-           override_fn, ExecutionContext::From(script_state),
+-           context->Global(), 0, nullptr, isolate)
+-           .ToLocal(&override_result)) {
+-    if (try_catch.HasCaught()) {
+-      v8::Local<v8::Promise::Resolver> v8_resolver;
+-      if (v8::Promise::Resolver::New(context).ToLocal(&v8_resolver)) {
+-        v8_resolver->Reject(context, try_catch.Exception()).Check();
+-        return ScriptPromise<T>::FromV8Promise(
+-            isolate, v8_resolver->GetPromise());
+-      }
+-    }
+-    return std::nullopt;
+-  }
++    return promise;
+ 
+-  v8::Local<v8::Promise::Resolver> v8_resolver;
+-  if (v8::Promise::Resolver::New(context).ToLocal(&v8_resolver)) {
+-    v8_resolver->Resolve(context, override_result).Check();
+-    return ScriptPromise<T>::FromV8Promise(
+-        isolate, v8_resolver->GetPromise());
++  v8::Local<v8::Promise> chained;
++  if (promise.V8Promise()
++          ->Then(script_state->GetContext(), override_fn)
++          .ToLocal(&chained)) {
++    return ScriptPromise<T>::FromV8Promise(isolate, chained);
+   }
+-  return std::nullopt;
++  return promise;
+ }
+ 
+ }  // namespace
+@@ -170,38 +155,6 @@ ScriptPromise<IDLAny> SubtleCrypto::encrypt(
+     CryptoKey* key,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (script_state && script_state->ContextIsValid()) {
+-    v8::Isolate* isolate = script_state->GetIsolate();
+-    v8::HandleScope handle_scope(isolate);
+-    ScriptState::Scope scope(script_state);
+-
+-    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
+-        script_state, "subtleCrypto", "encryptOverride");
+-    if (!override_fn.IsEmpty()) {
+-      v8::Local<v8::Context> context = script_state->GetContext();
+-      v8::TryCatch try_catch(isolate);
+-      v8::Local<v8::Value> override_result;
+-      if (!V8ScriptRunner::CallFunction(
+-               override_fn,
+-               ExecutionContext::From(script_state), context->Global(), 0,
+-               nullptr, isolate)
+-               .ToLocal(&override_result)) {
+-        if (try_catch.HasCaught()) {
+-          v8::Local<v8::Promise::Resolver> v8_resolver;
+-          if (v8::Promise::Resolver::New(context).ToLocal(&v8_resolver)) {
+-            v8_resolver->Reject(context, try_catch.Exception()).Check();
+-            return ScriptPromise<IDLAny>::FromV8Promise(
+-                isolate, v8_resolver->GetPromise());
+-          }
+-        }
+-      } else {
+-        return ScriptPromise<IDLAny>::FromV8Value(
+-            script_state, override_result);
+-      }
+-    }
+-  }
+-
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-encrypt
+ 
+@@ -241,7 +194,8 @@ ScriptPromise<IDLAny> SubtleCrypto::encrypt(
+   Platform::Current()->Crypto()->Encrypt(normalized_algorithm, key->Key(),
+                                          std::move(data), result->Result(),
+                                          std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "encryptOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::decrypt(
+@@ -250,9 +204,6 @@ ScriptPromise<IDLAny> SubtleCrypto::decrypt(
+     CryptoKey* key,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "decryptOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-decrypt
+@@ -293,7 +244,8 @@ ScriptPromise<IDLAny> SubtleCrypto::decrypt(
+   Platform::Current()->Crypto()->Decrypt(normalized_algorithm, key->Key(),
+                                          std::move(data), result->Result(),
+                                          std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "decryptOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::sign(
+@@ -302,9 +254,6 @@ ScriptPromise<IDLAny> SubtleCrypto::sign(
+     CryptoKey* key,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "signOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-sign
+@@ -345,7 +294,8 @@ ScriptPromise<IDLAny> SubtleCrypto::sign(
+   Platform::Current()->Crypto()->Sign(normalized_algorithm, key->Key(),
+                                       std::move(data), result->Result(),
+                                       std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "signOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::verifySignature(
+@@ -355,9 +305,6 @@ ScriptPromise<IDLAny> SubtleCrypto::verifySignature(
+     const V8BufferSource* raw_signature,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "verifyOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-verify
+@@ -402,7 +349,8 @@ ScriptPromise<IDLAny> SubtleCrypto::verifySignature(
+   Platform::Current()->Crypto()->VerifySignature(
+       normalized_algorithm, key->Key(), std::move(signature), std::move(data),
+       result->Result(), std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "verifyOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::digest(
+@@ -410,9 +358,6 @@ ScriptPromise<IDLAny> SubtleCrypto::digest(
+     const V8AlgorithmIdentifier* raw_algorithm,
+     const V8BufferSource* raw_data,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "digestOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-digest
+@@ -433,6 +378,7 @@ ScriptPromise<IDLAny> SubtleCrypto::digest(
+   auto* resolver =
+       MakeGarbageCollected<ScriptPromiseResolver<IDLAny>>(script_state);
+   auto* result = MakeGarbageCollected<CryptoResultImpl>(script_state, resolver);
++  auto promise = resolver->Promise();
+ 
+   HistogramAlgorithm(ExecutionContext::From(script_state),
+                      normalized_algorithm);
+@@ -442,7 +388,8 @@ ScriptPromise<IDLAny> SubtleCrypto::digest(
+   Platform::Current()->Crypto()->Digest(normalized_algorithm, std::move(data),
+                                         result->Result(),
+                                         std::move(task_runner));
+-  return resolver->Promise();
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "digestOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::generateKey(
+@@ -451,9 +398,6 @@ ScriptPromise<IDLAny> SubtleCrypto::generateKey(
+     bool extractable,
+     const Vector<String>& raw_key_usages,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "generateKeyOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-generateKey
+@@ -490,7 +434,8 @@ ScriptPromise<IDLAny> SubtleCrypto::generateKey(
+   Platform::Current()->Crypto()->GenerateKey(normalized_algorithm, extractable,
+                                              key_usages, result->Result(),
+                                              std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "generateKeyOverride");
+ }
+ 
+ ScriptPromise<CryptoKey> SubtleCrypto::importKey(
+@@ -501,9 +446,6 @@ ScriptPromise<CryptoKey> SubtleCrypto::importKey(
+     bool extractable,
+     const Vector<String>& raw_key_usages,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<CryptoKey>(script_state, "importKeyOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-importKey
+@@ -588,16 +530,14 @@ ScriptPromise<CryptoKey> SubtleCrypto::importKey(
+   Platform::Current()->Crypto()->ImportKey(
+       format, std::move(key_data), normalized_algorithm, extractable,
+       key_usages, result->Result(), std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "importKeyOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::exportKey(ScriptState* script_state,
+                                               const String& raw_format,
+                                               CryptoKey* key,
+                                               ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "exportKeyOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-exportKey
+@@ -626,7 +566,8 @@ ScriptPromise<IDLAny> SubtleCrypto::exportKey(ScriptState* script_state,
+           ->GetTaskRunner(blink::TaskType::kInternalWebCrypto);
+   Platform::Current()->Crypto()->ExportKey(format, key->Key(), result->Result(),
+                                            std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "exportKeyOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::wrapKey(
+@@ -636,9 +577,6 @@ ScriptPromise<IDLAny> SubtleCrypto::wrapKey(
+     CryptoKey* wrapping_key,
+     const V8AlgorithmIdentifier* raw_wrap_algorithm,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "wrapKeyOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-wrapKey
+@@ -698,7 +636,8 @@ ScriptPromise<IDLAny> SubtleCrypto::wrapKey(
+   Platform::Current()->Crypto()->WrapKey(
+       format, key->Key(), wrapping_key->Key(), normalized_algorithm,
+       result->Result(), std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "wrapKeyOverride");
+ }
+ 
+ ScriptPromise<CryptoKey> SubtleCrypto::unwrapKey(
+@@ -711,9 +650,6 @@ ScriptPromise<CryptoKey> SubtleCrypto::unwrapKey(
+     bool extractable,
+     const Vector<String>& raw_key_usages,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<CryptoKey>(script_state, "unwrapKeyOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-unwrapKey
+@@ -789,7 +725,8 @@ ScriptPromise<CryptoKey> SubtleCrypto::unwrapKey(
+       format, std::move(wrapped_key), unwrapping_key->Key(),
+       normalized_algorithm, normalized_key_algorithm, extractable, key_usages,
+       result->Result(), std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "unwrapKeyOverride");
+ }
+ 
+ ScriptPromise<DOMArrayBuffer> SubtleCrypto::deriveBits(
+@@ -798,9 +735,6 @@ ScriptPromise<DOMArrayBuffer> SubtleCrypto::deriveBits(
+     CryptoKey* base_key,
+     std::optional<unsigned> length_bits,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<DOMArrayBuffer>(script_state, "deriveBitsOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#dfn-SubtleCrypto-method-deriveBits
+@@ -838,7 +772,8 @@ ScriptPromise<DOMArrayBuffer> SubtleCrypto::deriveBits(
+       normalized_algorithm, base_key->Key(), length_bits, result->Result(),
+       execution_context->GetTaskRunner(blink::TaskType::kInternalWebCrypto));
+ 
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "deriveBitsOverride");
+ }
+ 
+ ScriptPromise<IDLAny> SubtleCrypto::deriveKey(
+@@ -849,9 +784,6 @@ ScriptPromise<IDLAny> SubtleCrypto::deriveKey(
+     bool extractable,
+     const Vector<String>& raw_key_usages,
+     ExceptionState& exception_state) {
+-  // Check for override
+-  if (auto ovr = MaybeSubtleCryptoOverride<IDLAny>(script_state, "deriveKeyOverride"))
+-    return *ovr;
+ 
+   // Method described by:
+   // https://w3c.github.io/webcrypto/Overview.html#SubtleCrypto-method-deriveKey
+@@ -926,7 +858,8 @@ ScriptPromise<IDLAny> SubtleCrypto::deriveKey(
+       normalized_algorithm, base_key->Key(), normalized_derived_key_algorithm,
+       key_length_algorithm, extractable, key_usages, result->Result(),
+       std::move(task_runner));
+-  return promise;
++  return MaybeChainSubtleCryptoOverride(script_state, promise,
++                                        "deriveKeyOverride");
+ }
+ 
+ }  // namespace blink
