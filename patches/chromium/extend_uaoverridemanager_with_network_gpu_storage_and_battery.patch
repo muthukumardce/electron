@@ -1,0 +1,503 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Wed, 11 Feb 2026 21:08:02 +0530
+Subject: Extend UAOverrideManager with network, GPU, storage, and battery
+ overrides
+
+Add network connection fields (type, effectiveType, rtt, downlink, saveData),
+GPU renderer/vendor strings, and storage quota to UAOverrideValues. These are
+stored via setUA() and read by ForBinding methods across all worker types for
+consistent fingerprinting.
+
+NetworkInformation: 5 ForBinding methods (type, effectiveType, rtt, downlink,
+saveData) now check UAOverrideManager before falling back to customOverrides.
+
+WebGL: getParameterForBinding checks UAOverrideManager for RENDERER (0x9245)
+and VENDOR (0x9246) pnames in both standard and WebGPU-backed contexts.
+
+StorageManager: estimate() callback checks UAOverrideManager for quota override.
+
+BatteryManager: Add ForBinding hooks for charging, chargingTime, dischargingTime,
+and level properties via customOverrides.batteryManager interface. IDL updated
+with CallWith=ScriptState and ImplementedAs annotations.
+
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index 8550d0d25af1a985c25d0c785b413e24f6c28cd6..d27685917aebb43abc586f22cc25f424c12c98a9 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -47,6 +47,14 @@ void UAOverrideValues_Storage::Reset() {
+   override_on_line.reset();
+   override_hardware_concurrency.reset();
+   override_device_memory.reset();
++  override_connection_type.reset();
++  override_connection_effective_type.reset();
++  override_connection_rtt.reset();
++  override_connection_downlink.reset();
++  override_connection_save_data.reset();
++  override_gpu_renderer.reset();
++  override_gpu_vendor.reset();
++  override_storage_quota.reset();
+ }
+ 
+ // UAOverrideManager singleton - thread-safe for Service Worker access
+@@ -287,6 +295,36 @@ void NavigatorUAData::setUA(const UAOverrideValues* override_values) {
+   if (override_values->hasDeviceMemory()) {
+     storage->override_device_memory = override_values->deviceMemory();
+   }
++
++  // Network overrides
++  if (override_values->hasConnectionType()) {
++    storage->override_connection_type = override_values->connectionType();
++  }
++  if (override_values->hasConnectionEffectiveType()) {
++    storage->override_connection_effective_type = override_values->connectionEffectiveType();
++  }
++  if (override_values->hasConnectionRtt()) {
++    storage->override_connection_rtt = override_values->connectionRtt();
++  }
++  if (override_values->hasConnectionDownlink()) {
++    storage->override_connection_downlink = override_values->connectionDownlink();
++  }
++  if (override_values->hasConnectionSaveData()) {
++    storage->override_connection_save_data = override_values->connectionSaveData();
++  }
++
++  // GPU overrides
++  if (override_values->hasGpuRenderer()) {
++    storage->override_gpu_renderer = override_values->gpuRenderer();
++  }
++  if (override_values->hasGpuVendor()) {
++    storage->override_gpu_vendor = override_values->gpuVendor();
++  }
++
++  // Storage override
++  if (override_values->hasStorageQuota()) {
++    storage->override_storage_quota = override_values->storageQuota();
++  }
+ }
+ 
+ HeapVector<Member<NavigatorUABrandVersion>> NavigatorUAData::BuildOverrideBrands(
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.h b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+index 30ea2692a7528a7d34a6314772a6a233d94fcd77..abfa591fbf3d26236b2e67f0134d46d77cc9f844 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.h
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+@@ -48,6 +48,17 @@ struct UAOverrideValues_Storage {
+   std::optional<bool> override_on_line;
+   std::optional<unsigned> override_hardware_concurrency;
+   std::optional<float> override_device_memory;
++  // Network overrides
++  std::optional<String> override_connection_type;
++  std::optional<String> override_connection_effective_type;
++  std::optional<unsigned> override_connection_rtt;
++  std::optional<double> override_connection_downlink;
++  std::optional<bool> override_connection_save_data;
++  // GPU overrides
++  std::optional<String> override_gpu_renderer;
++  std::optional<String> override_gpu_vendor;
++  // Storage override
++  std::optional<uint64_t> override_storage_quota;
+ 
+   void Reset();
+ };
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.idl b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+index 251c31324890abca1c3288f88e21f44b5829abc9..5edea99a23c443fb62c40dc2578639eb390e9965 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.idl
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+@@ -25,6 +25,17 @@ dictionary UAOverrideValues {
+   boolean onLine;
+   unsigned long hardwareConcurrency;
+   float deviceMemory;
++  // Network overrides
++  DOMString connectionType;
++  DOMString connectionEffectiveType;
++  unsigned long connectionRtt;
++  double connectionDownlink;
++  boolean connectionSaveData;
++  // GPU overrides
++  DOMString gpuRenderer;
++  DOMString gpuVendor;
++  // Storage override
++  unsigned long long storageQuota;
+ };
+ 
+ [Exposed=(Window,Worker)] interface NavigatorUAData {
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.cc b/third_party/blink/renderer/modules/battery/battery_manager.cc
+index 72edd51596971cc1a47bc7f8938af90a5a0e0626..373b6a897776d5831da88474d2d26bc27192cf29 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.cc
++++ b/third_party/blink/renderer/modules/battery/battery_manager.cc
+@@ -103,18 +103,102 @@ bool BatteryManager::charging() {
+   return battery_status_.Charging();
+ }
+ 
++bool BatteryManager::chargingForBinding(ScriptState* script_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "batteryManager", "chargingOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&result) &&
++          result->IsBoolean()) {
++        return result.As<v8::Boolean>()->Value();
++      }
++    }
++  }
++  return charging();
++}
++
+ double BatteryManager::chargingTime() {
+   return battery_status_.charging_time().InSecondsF();
+ }
+ 
++double BatteryManager::chargingTimeForBinding(ScriptState* script_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "batteryManager", "chargingTimeOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&result) &&
++          result->IsNumber()) {
++        return result.As<v8::Number>()->Value();
++      }
++    }
++  }
++  return chargingTime();
++}
++
+ double BatteryManager::dischargingTime() {
+   return battery_status_.discharging_time().InSecondsF();
+ }
+ 
++double BatteryManager::dischargingTimeForBinding(ScriptState* script_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "batteryManager", "dischargingTimeOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&result) &&
++          result->IsNumber()) {
++        return result.As<v8::Number>()->Value();
++      }
++    }
++  }
++  return dischargingTime();
++}
++
+ double BatteryManager::level() {
+   return battery_status_.Level();
+ }
+ 
++double BatteryManager::levelForBinding(ScriptState* script_state) {
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn = GetCustomOverrideFunction(
++        script_state, "batteryManager", "levelOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> result;
++      if (override_fn
++              ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
++                     nullptr)
++              .ToLocal(&result) &&
++          result->IsNumber()) {
++        return result.As<v8::Number>()->Value();
++      }
++    }
++  }
++  return level();
++}
++
+ void BatteryManager::DidUpdateData() {
+   DCHECK(battery_property_);
+ 
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.h b/third_party/blink/renderer/modules/battery/battery_manager.h
+index d922d4bafd76d6b2d269343ad0f7fb209cc9c3e6..95c93e33e03f9670e023e49e60abc4e9e6463199 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.h
++++ b/third_party/blink/renderer/modules/battery/battery_manager.h
+@@ -18,6 +18,7 @@
+ namespace blink {
+ 
+ class Navigator;
++class ScriptState;
+ 
+ class BatteryManager final : public EventTarget,
+                              public ActiveScriptWrappable<BatteryManager>,
+@@ -44,9 +45,13 @@ class BatteryManager final : public EventTarget,
+   }
+ 
+   bool charging();
++  bool chargingForBinding(ScriptState*);
+   double chargingTime();
++  double chargingTimeForBinding(ScriptState*);
+   double dischargingTime();
++  double dischargingTimeForBinding(ScriptState*);
+   double level();
++  double levelForBinding(ScriptState*);
+ 
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(chargingchange, kChargingchange)
+   DEFINE_ATTRIBUTE_EVENT_LISTENER(chargingtimechange, kChargingtimechange)
+diff --git a/third_party/blink/renderer/modules/battery/battery_manager.idl b/third_party/blink/renderer/modules/battery/battery_manager.idl
+index 16b588163e3061765ca58733566219c12d192b9c..495b6b93c8c8de6feaf666161ffe1e8c60fc928c 100644
+--- a/third_party/blink/renderer/modules/battery/battery_manager.idl
++++ b/third_party/blink/renderer/modules/battery/battery_manager.idl
+@@ -8,10 +8,10 @@
+     SecureContext,
+     Exposed=Window
+ ] interface BatteryManager : EventTarget {
+-    [Measure] readonly attribute boolean charging;
+-    [Measure] readonly attribute unrestricted double chargingTime;
+-    [Measure] readonly attribute unrestricted double dischargingTime;
+-    [Measure] readonly attribute double level;
++    [Measure, CallWith=ScriptState, ImplementedAs=chargingForBinding] readonly attribute boolean charging;
++    [Measure, CallWith=ScriptState, ImplementedAs=chargingTimeForBinding] readonly attribute unrestricted double chargingTime;
++    [Measure, CallWith=ScriptState, ImplementedAs=dischargingTimeForBinding] readonly attribute unrestricted double dischargingTime;
++    [Measure, CallWith=ScriptState, ImplementedAs=levelForBinding] readonly attribute double level;
+ 
+     attribute EventHandler onchargingchange;
+     attribute EventHandler onchargingtimechange;
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 6af9a4dd4212886057fee0822e48fac509065989..c0f441336ffba8d5be3b6262e60e04ff605c9629 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -24,6 +24,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/to_v8_traits.h"
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ 
+ namespace blink {
+ 
+@@ -103,6 +104,21 @@ V8ConnectionType NetworkInformation::type() const {
+ 
+ V8ConnectionType NetworkInformation::typeForBinding(
+     ScriptState* script_state) const {
++  // Check Agent-cluster storage first (works in workers)
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_connection_type.has_value()) {
++        auto overridden = V8ConnectionType::Create(
++            storage->override_connection_type.value());
++        if (overridden.has_value())
++          return overridden.value();
++      }
++    }
++  }
+   V8ConnectionType result = type();
+   if (!script_state || !script_state->ContextIsValid())
+     return result;
+@@ -163,6 +179,21 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+ 
+ V8EffectiveConnectionType NetworkInformation::effectiveTypeForBinding(
+     ScriptState* script_state) {
++  // Check Agent-cluster storage first (works in workers)
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_connection_effective_type.has_value()) {
++        auto overridden = V8EffectiveConnectionType::Create(
++            storage->override_connection_effective_type.value());
++        if (overridden.has_value())
++          return overridden.value();
++      }
++    }
++  }
+   V8EffectiveConnectionType result = effectiveType();
+   if (!script_state || !script_state->ContextIsValid())
+     return result;
+@@ -254,17 +285,53 @@ bool MaybeBoolOverride(ScriptState* script_state,
+ }  // namespace
+ 
+ uint32_t NetworkInformation::rttForBinding(ScriptState* script_state) {
++  // Check Agent-cluster storage first (works in workers)
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_connection_rtt.has_value()) {
++        return storage->override_connection_rtt.value();
++      }
++    }
++  }
+   return static_cast<uint32_t>(MaybeDoubleOverride(
+       script_state, static_cast<double>(rtt()), "networkInformation",
+       "rttOverride"));
+ }
+ 
+ double NetworkInformation::downlinkForBinding(ScriptState* script_state) {
++  // Check Agent-cluster storage first (works in workers)
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_connection_downlink.has_value()) {
++        return storage->override_connection_downlink.value();
++      }
++    }
++  }
+   return MaybeDoubleOverride(script_state, downlink(), "networkInformation",
+                              "downlinkOverride");
+ }
+ 
+ bool NetworkInformation::saveDataForBinding(ScriptState* script_state) const {
++  // Check Agent-cluster storage first (works in workers)
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_connection_save_data.has_value()) {
++        return storage->override_connection_save_data.value();
++      }
++    }
++  }
+   return MaybeBoolOverride(script_state, saveData(), "networkInformation",
+                            "saveDataOverride");
+ }
+diff --git a/third_party/blink/renderer/modules/quota/storage_manager.cc b/third_party/blink/renderer/modules/quota/storage_manager.cc
+index 6c583c378d5257f8715540c68956cd756d1ae8e6..43e7af836b9ad83f6a6a5599de8a6440eac2ac9d 100644
+--- a/third_party/blink/renderer/modules/quota/storage_manager.cc
++++ b/third_party/blink/renderer/modules/quota/storage_manager.cc
+@@ -21,6 +21,7 @@
+ #include "third_party/blink/renderer/modules/permissions/permission_utils.h"
+ #include "third_party/blink/renderer/modules/quota/quota_utils.h"
+ #include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_throw_exception.h"
+ #include "third_party/blink/renderer/platform/heap/garbage_collected.h"
+ #include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+@@ -68,9 +69,24 @@ void QueryStorageUsageAndQuotaCallback(
+     return;
+   }
+ 
++  // Check Agent-cluster storage for quota override (works in workers)
++  int64_t effective_quota = quota_in_bytes;
++  ScriptState* script_state = resolver->GetScriptState();
++  if (script_state && script_state->ContextIsValid()) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override &&
++          storage->override_storage_quota.has_value()) {
++        effective_quota = static_cast<int64_t>(storage->override_storage_quota.value());
++      }
++    }
++  }
++
+   StorageEstimate* estimate = StorageEstimate::Create();
+   estimate->setUsage(usage_in_bytes);
+-  estimate->setQuota(quota_in_bytes);
++  estimate->setQuota(effective_quota);
+ 
+   // We only want to show usage details for systems that are used by the app,
+   // this way we do not create any web compatibility issues by unecessarily
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 4593c35269851de7e05b14d00cf152d370817ac5..b5115a9234e9f102cc201a4aa6279d68cdc829c4 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -124,6 +124,7 @@
+ #include "third_party/blink/renderer/modules/webgl/webgl_vertex_array_object_oes.h"
+ #include "third_party/blink/renderer/modules/xr/xr_system.h"
+ #include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_binding_macros.h"
+@@ -4148,6 +4149,27 @@ ScriptValue WebGLRenderingContextBase::getParameterForBinding(
+   if (!script_state || !script_state->ContextIsValid())
+     return result;
+ 
++  // Check Agent-cluster storage for GPU overrides (works in workers)
++  if (pname == 0x9245 /*UNMASKED_VENDOR_WEBGL*/ ||
++      pname == 0x9246 /*UNMASKED_RENDERER_WEBGL*/) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override) {
++        v8::Isolate* isolate = script_state->GetIsolate();
++        if (pname == 0x9246 && storage->override_gpu_renderer.has_value()) {
++          return ScriptValue(isolate,
++              V8String(isolate, storage->override_gpu_renderer.value()));
++        }
++        if (pname == 0x9245 && storage->override_gpu_vendor.has_value()) {
++          return ScriptValue(isolate,
++              V8String(isolate, storage->override_gpu_vendor.value()));
++        }
++      }
++    }
++  }
++
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::HandleScope handle_scope(isolate);
+   ScriptState::Scope scope(script_state);
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+index 2b6cc2e2f83cca288bc6000b29e296940005c0dc..66ef12c216bbc1b8d9424c54e802fedeb9dfff8f 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_webgpu_base.cc
+@@ -29,6 +29,7 @@
+ #include "third_party/blink/renderer/bindings/core/v8/v8_script_runner.h"
+ #include "third_party/blink/renderer/modules/webgl/webgl_shader_precision_format.h"
+ #include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/platform/graphics/gpu/dawn_control_client_holder.h"
+ #include "third_party/blink/renderer/platform/graphics/gpu/webgpu_callback.h"
+ #include "third_party/blink/renderer/platform/graphics/skia/skia_utils.h"
+@@ -4357,6 +4358,27 @@ ScriptValue WebGLRenderingContextWebGPUBase::getParameterForBinding(
+   if (!script_state || !script_state->ContextIsValid())
+     return result;
+ 
++  // Check Agent-cluster storage for GPU overrides (works in workers)
++  if (pname == 0x9245 /*UNMASKED_VENDOR_WEBGL*/ ||
++      pname == 0x9246 /*UNMASKED_RENDERER_WEBGL*/) {
++    ExecutionContext* ctx = ExecutionContext::From(script_state);
++    if (ctx) {
++      auto* storage = UAOverrideManager::GetInstance().GetStorageForCluster(
++          ctx->GetAgentClusterID());
++      if (storage && storage->has_override) {
++        v8::Isolate* isolate = script_state->GetIsolate();
++        if (pname == 0x9246 && storage->override_gpu_renderer.has_value()) {
++          return ScriptValue(isolate,
++              V8String(isolate, storage->override_gpu_renderer.value()));
++        }
++        if (pname == 0x9245 && storage->override_gpu_vendor.has_value()) {
++          return ScriptValue(isolate,
++              V8String(isolate, storage->override_gpu_vendor.value()));
++        }
++      }
++    }
++  }
++
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::HandleScope handle_scope(isolate);
+   ScriptState::Scope scope(script_state);
