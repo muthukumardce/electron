@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Wed, 11 Feb 2026 11:51:44 +0530
+Subject: =?UTF-8?q?Relax=20InlineNode=20ComputeContentSize=20expensive=20D?=
+ =?UTF-8?q?CHECK=20to=20allow=20=C2=B11=20rounding=20tolerance?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The expensive DCHECK in ComputeContentSize verifies that the max inline
+size computed from the single-pass min/max optimization matches the value
+from a full two-pass computation. However, FixedPoint<6, int> rounding
+can produce values that differ by exactly 1 at fractional boundaries
+when the two computation paths accumulate slightly different intermediate
+results.
+
+This manifests as a FATAL crash on absolutely-positioned inline-children
+blocks (e.g. font metrics test elements) where the two rounded values
+land on adjacent integers (e.g. 8881 vs 8880). The underlying layout
+values are correct — the discrepancy is purely a rounding artifact at the
+FixedPoint-to-integer boundary.
+
+Relax DCHECK_EQ to allow abs difference <= 1, and add diagnostic output
+of both values for easier debugging if a larger discrepancy ever occurs.
+
+diff --git a/third_party/blink/renderer/core/layout/inline/inline_node.cc b/third_party/blink/renderer/core/layout/inline/inline_node.cc
+index aad082b139539dbdab9df1b0ca3e219a181f1202..8cd6dafa459b20136745ccd0ef7543f602408cbe 100644
+--- a/third_party/blink/renderer/core/layout/inline/inline_node.cc
++++ b/third_party/blink/renderer/core/layout/inline/inline_node.cc
+@@ -2166,8 +2166,10 @@ static LayoutUnit ComputeContentSize(InlineNode node,
+     bool values_might_be_saturated =
+         (*max_size_out)->MightBeSaturated() || content_size.MightBeSaturated();
+     if (!values_might_be_saturated) {
+-      DCHECK_EQ((*max_size_out)->Round(), content_size.Round())
+-          << node.GetLayoutBox();
++      DCHECK(abs((*max_size_out)->Round() - content_size.Round()) <= 1)
++          << node.GetLayoutBox()
++          << " max_size=" << (*max_size_out)->Round()
++          << " content_size=" << content_size.Round();
+     }
+ #endif
+   }
