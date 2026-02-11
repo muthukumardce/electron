@@ -71,6 +71,8 @@ void ElectronApiIPCHandlerImpl::Invoke(bool internal,
     v8::Local<v8::Object> event_object =
         event->GetWrapper(isolate).ToLocalChecked();
     session->Get()->Invoke(event_object, channel, std::move(arguments));
+  } else if (callback) {
+    std::move(callback).Run(blink::CloneableMessage());
   }
 }
 
@@ -106,6 +108,8 @@ void ElectronApiIPCHandlerImpl::MessageSync(bool internal,
     v8::Local<v8::Object> event_object =
         event->GetWrapper(isolate).ToLocalChecked();
     session->Get()->MessageSync(event_object, channel, std::move(arguments));
+  } else {
+    std::move(callback).Run(blink::CloneableMessage());
   }
 }
 

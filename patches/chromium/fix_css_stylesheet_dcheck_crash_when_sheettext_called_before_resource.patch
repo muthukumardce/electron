@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Wed, 11 Feb 2026 22:42:52 +0530
+Subject: Fix CSS stylesheet DCHECK crash when SheetText called before resource
+ fully cached
+
+The original code assumed decoded_sheet_text_ would only be non-null when
+the resource status is kCached, enforced by a DCHECK. In practice, SheetText
+can be called while the resource is still loading (e.g. during permission
+observer setup or early style resolution), causing a DCHECK failure that
+crashes debug builds and may produce incorrect results in release.
+
+Replace the DCHECK with a runtime check: if the resource is not yet fully
+cached but has raw data available, decode it fresh via DecodedText() rather
+than returning the stale cached text. This prevents the crash while still
+returning correct stylesheet content at all resource lifecycle stages.
+
+diff --git a/third_party/blink/renderer/core/loader/resource/css_style_sheet_resource.cc b/third_party/blink/renderer/core/loader/resource/css_style_sheet_resource.cc
+index 8d82027d5d2f8d5e6b2daa675fa0b291cfa05eff..c846fb23f0c56fade684ff53f7b9913e56bb840d 100644
+--- a/third_party/blink/renderer/core/loader/resource/css_style_sheet_resource.cc
++++ b/third_party/blink/renderer/core/loader/resource/css_style_sheet_resource.cc
+@@ -136,10 +136,9 @@ const String CSSStyleSheetResource::SheetText(
+ 
+   // Use cached decoded sheet text when available
+   if (!decoded_sheet_text_.IsNull()) {
+-    // We should have the decoded sheet text cached when the resource is fully
+-    // loaded.
+-    DCHECK_EQ(GetStatus(), ResourceStatus::kCached);
+-
++    if (GetStatus() != ResourceStatus::kCached) {
++      return Data() && !Data()->empty() ? DecodedText() : String();
++    }
+     return decoded_sheet_text_;
+   }
+ 
