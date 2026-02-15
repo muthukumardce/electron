@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Sun, 15 Feb 2026 10:56:51 +0530
+Subject: Wire up font enumeration, WebGL extension filtering, and geolocation
+ spoofing
+
+font_face_set.cc:
+- Replace MaybeBoolOverride in checkForBinding with custom call that passes
+  both the font name string and the boolean result to the JS override, enabling
+  per-font whitelist decisions instead of blanket true/false
+
+webgl_rendering_context_base.cc:
+- Change getSupportedExtensionsForBinding to parse the override return value
+  when it's an array, converting each element to a WTF::String and returning
+  the overridden list instead of the original GPU-specific extension set
+
+geolocation.cc:
+- Modify getCurrentPositionForBinding and watchPositionForBinding to check if
+  the JS override returns an object with latitude/longitude/accuracy properties
+- When present, construct GeolocationCoordinates and Geoposition from the
+  spoofed values and invoke the success callback directly, bypassing the Mojo
+  geolocation service entirely
+- watchPositionForBinding returns a unique CircularSequentialID as watch_id
+
+diff --git a/third_party/blink/renderer/core/css/font_face_set.cc b/third_party/blink/renderer/core/css/font_face_set.cc
+index 74f1a7efa7d6d976c6bf4e304ab13c41c66adb97..c86bc23b582fb6fb8f0fbe76bcfadcb6139e88c8 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.cc
++++ b/third_party/blink/renderer/core/css/font_face_set.cc
+@@ -383,8 +383,29 @@ bool FontFaceSet::checkForBinding(ScriptState* script_state,
+   bool result = check(font, text, exception_state);
+   if (exception_state.HadException())
+     return result;
+-  return MaybeBoolOverride(script_state, "fontFaceSet",
+-                           "checkOverride", result);
++
++  // Custom override that passes both font string and result to JS,
++  // so the override can make per-font decisions (font whitelist).
++  if (script_state && script_state->ContextIsValid()) {
++    v8::Isolate* isolate = script_state->GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    v8::Local<v8::Function> override_fn =
++        GetCustomOverrideFunction(script_state, "fontFaceSet", "checkOverride");
++    if (!override_fn.IsEmpty()) {
++      v8::Local<v8::Context> context = script_state->GetContext();
++      v8::Local<v8::Value> argv[] = {
++          V8String(isolate, font),
++          v8::Boolean::New(isolate, result)};
++      v8::TryCatch try_catch(isolate);
++      v8::Local<v8::Value> override_result;
++      if (override_fn->Call(context, v8::Undefined(isolate), 2, argv)
++              .ToLocal(&override_result) &&
++          override_result->IsBoolean()) {
++        return override_result.As<v8::Boolean>()->Value();
++      }
++    }
++  }
++  return result;
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/geolocation/geolocation.cc b/third_party/blink/renderer/core/geolocation/geolocation.cc
+index 1c09409d545ce50e5f5d6ca1d8a97ebc8692cd0b..ef65a9c3a64a614d51f83098a0f60f970eb24948 100644
+--- a/third_party/blink/renderer/core/geolocation/geolocation.cc
++++ b/third_party/blink/renderer/core/geolocation/geolocation.cc
+@@ -720,7 +720,29 @@ void Geolocation::getCurrentPositionForBinding(
+       if (override_fn
+               ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
+                      nullptr)
+-              .ToLocal(&override_result)) {
++              .ToLocal(&override_result) &&
++          override_result->IsObject()) {
++        v8::Local<v8::Object> obj = override_result.As<v8::Object>();
++        v8::Local<v8::Context> context = script_state->GetContext();
++        v8::Local<v8::Value> lat_val, lng_val, acc_val;
++        if (obj->Get(context, V8AtomicString(isolate, "latitude"))
++                .ToLocal(&lat_val) &&
++            obj->Get(context, V8AtomicString(isolate, "longitude"))
++                .ToLocal(&lng_val) &&
++            obj->Get(context, V8AtomicString(isolate, "accuracy"))
++                .ToLocal(&acc_val) &&
++            lat_val->IsNumber() && lng_val->IsNumber() &&
++            acc_val->IsNumber()) {
++          auto* coords = MakeGarbageCollected<GeolocationCoordinates>(
++              lat_val.As<v8::Number>()->Value(),
++              lng_val.As<v8::Number>()->Value(), std::nullopt,
++              acc_val.As<v8::Number>()->Value(), std::nullopt, std::nullopt,
++              std::nullopt);
++          auto* position = MakeGarbageCollected<Geoposition>(
++              coords, ConvertTimeToEpochTimeStamp(base::Time::Now()));
++          success_callback->InvokeAndReportException(nullptr, position);
++          return;
++        }
+       }
+     }
+   }
+@@ -743,7 +765,30 @@ int32_t Geolocation::watchPositionForBinding(
+       if (override_fn
+               ->Call(script_state->GetContext(), v8::Undefined(isolate), 0,
+                      nullptr)
+-              .ToLocal(&override_result)) {
++              .ToLocal(&override_result) &&
++          override_result->IsObject()) {
++        v8::Local<v8::Object> obj = override_result.As<v8::Object>();
++        v8::Local<v8::Context> context = script_state->GetContext();
++        v8::Local<v8::Value> lat_val, lng_val, acc_val;
++        if (obj->Get(context, V8AtomicString(isolate, "latitude"))
++                .ToLocal(&lat_val) &&
++            obj->Get(context, V8AtomicString(isolate, "longitude"))
++                .ToLocal(&lng_val) &&
++            obj->Get(context, V8AtomicString(isolate, "accuracy"))
++                .ToLocal(&acc_val) &&
++            lat_val->IsNumber() && lng_val->IsNumber() &&
++            acc_val->IsNumber()) {
++          auto* coords = MakeGarbageCollected<GeolocationCoordinates>(
++              lat_val.As<v8::Number>()->Value(),
++              lng_val.As<v8::Number>()->Value(), std::nullopt,
++              acc_val.As<v8::Number>()->Value(), std::nullopt, std::nullopt,
++              std::nullopt);
++          auto* position = MakeGarbageCollected<Geoposition>(
++              coords, ConvertTimeToEpochTimeStamp(base::Time::Now()));
++          success_callback->InvokeAndReportException(nullptr, position);
++          int watch_id = GetExecutionContext()->CircularSequentialID();
++          return watch_id;
++        }
+       }
+     }
+   }
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index b5115a9234e9f102cc201a4aa6279d68cdc829c4..95a9c06fdadf34298b08662469f2ec2bee40f53b 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4451,7 +4451,21 @@ WebGLRenderingContextBase::getSupportedExtensionsForBinding(
+     v8::Local<v8::Value> override_result;
+     if (override_fn
+             ->Call(script_state->GetContext(), v8::Undefined(isolate), 1, args)
+-            .ToLocal(&override_result)) {
++            .ToLocal(&override_result) &&
++        override_result->IsArray()) {
++      // Use the override's returned array as the extension list
++      v8::Local<v8::Array> arr = override_result.As<v8::Array>();
++      Vector<String> overridden;
++      overridden.ReserveInitialCapacity(arr->Length());
++      v8::Local<v8::Context> context = script_state->GetContext();
++      for (uint32_t i = 0; i < arr->Length(); i++) {
++        v8::Local<v8::Value> item;
++        if (arr->Get(context, i).ToLocal(&item) && item->IsString()) {
++          v8::String::Utf8Value utf8(isolate, item);
++          overridden.push_back(String(*utf8));
++        }
++      }
++      return overridden;
+     }
+   }
+   return result;
