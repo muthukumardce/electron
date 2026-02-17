@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Tue, 17 Feb 2026 18:10:30 +0530
+Subject: Replace DCHECK on negative time delta with graceful skip in
+ ThreadController TimeKeeper
+
+RecordTimeInPhase() previously hit a DCHECK(!delta.is_negative()) crash
+when the phase_end timestamp preceded phase_begin, which can occur due to
+clock adjustments or imprecise timing on certain platforms. Negative deltas
+are just as invalid for histogram recording as deltas exceeding the 30-second
+skip threshold, so fold the negative check into the existing early-return
+guard instead of asserting. This prevents crashes in debug/canary builds
+while preserving the existing skip logic for anomalously large deltas.
+
+diff --git a/base/task/sequence_manager/thread_controller.cc b/base/task/sequence_manager/thread_controller.cc
+index 0a18be265140ccfe0da2b82a2da30f4bba51a767..161ab51c476ceebe41f82702533cb6842248708c 100644
+--- a/base/task/sequence_manager/thread_controller.cc
++++ b/base/task/sequence_manager/thread_controller.cc
+@@ -644,8 +644,7 @@ void ThreadController::RunLevelTracker::TimeKeeper::RecordTimeInPhase(
+   static constexpr auto kSkippedDelta = Seconds(30);
+ 
+   const auto delta = phase_end - phase_begin;
+-  DCHECK(!delta.is_negative()) << delta;
+-  if (delta >= kSkippedDelta) {
++  if (delta.is_negative() || delta >= kSkippedDelta) {
+     return;
+   }
+ 
