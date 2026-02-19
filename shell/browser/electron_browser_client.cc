@@ -24,6 +24,7 @@
 #include "base/process/process_metrics.h"
 #include "base/strings/escape.h"
 #include "base/strings/string_util.h"
+#include "base/version_info/version_info.h"
 #include "chrome/browser/browser_process.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/chrome_switches.h"
@@ -1060,7 +1061,25 @@ void ElectronBrowserClient::SetUserAgent(const std::string& user_agent) {
 }
 
 blink::UserAgentMetadata ElectronBrowserClient::GetUserAgentMetadata() {
-  return embedder_support::GetUserAgentMetadata();
+  blink::UserAgentMetadata metadata = embedder_support::GetUserAgentMetadata();
+
+  // Add "Google Chrome" brand to sec-ch-ua headers to match real Chrome.
+  // Without this, only GREASE + Chromium are present (missing the 3rd brand).
+  bool has_chrome_brand = false;
+  for (const auto& entry : metadata.brand_version_list) {
+    if (entry.brand == "Google Chrome") {
+      has_chrome_brand = true;
+      break;
+    }
+  }
+  if (!has_chrome_brand) {
+    std::string major = version_info::GetMajorVersionNumber();
+    std::string full = std::string(version_info::GetVersionNumber());
+    metadata.brand_version_list.emplace_back("Google Chrome", major);
+    metadata.brand_full_version_list.emplace_back("Google Chrome", full);
+  }
+
+  return metadata;
 }
 
 mojo::PendingRemote<network::mojom::URLLoaderFactory>
