@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Mon, 23 Feb 2026 20:35:42 +0530
+Subject: Migrate override storage from string key to Symbol key for
+ anti-detection
+
+Replace all window.customOverrides (string property) lookups with
+window[Symbol.for('__co')] (Symbol property) across the entire override
+hook system. Symbol-keyed properties are invisible to
+Object.getOwnPropertyNames(window), which bot detection libraries like
+FingerprintJS use to enumerate non-standard window properties.
+
+Files changed:
+- v8_builtin_overrides.cc: Updated GenericBuiltinWrapper,
+  GenericConstructorWrapper, InstallPropertyExistenceOverrides,
+  OverridePropertyAccessorGetter, OverrideDataPropertyGetter,
+  GenericOverrideOnlyCallback, and all Pattern V/X/Y callbacks
+  to use v8::Symbol::For(isolate, "__co") instead of string key
+- custom_override_helpers.h: Updated GetCustomOverrideFunction
+  shared helper used by all ForBinding pattern (A-G) methods
+
+All 283 override APIs across 20 batches now use the Symbol path.
+The preload scripts already use Symbol.for('__co') so this change
+makes the C++ side consistent with the JS side.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index b2365cfad4c71262973146a8b5605b7e8ac0b650..16cb2af03a258b4b61f2ac91e3151d48daad724d 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -18,7 +18,7 @@ constexpr int kDataOverrideName = 2;
+ 
+ // Generic wrapper callback for V8 built-in functions.
+ // Called when a wrapped function (e.g. Math.cos) is invoked from JS.
+-// Calls the original, then checks window.customOverrides for an override.
++// Calls the original, then checks window[Symbol.for('__co')] for an override.
+ void GenericBuiltinWrapper(const v8::FunctionCallbackInfo<v8::Value>& info) {
+   v8::Isolate* isolate = info.GetIsolate();
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+@@ -44,12 +44,12 @@ void GenericBuiltinWrapper(const v8::FunctionCallbackInfo<v8::Value>& info) {
+     return;
+   }
+ 
+-  // Look up override: window.customOverrides[interfaceKey][overrideName]
++  // Look up override: window[Symbol.for('__co')][interfaceKey][overrideName]
+   v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Symbol> co_key =
++      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+   v8::Local<v8::Value> custom_overrides;
+-  if (!global
+-           ->Get(context, V8AtomicString(isolate, "customOverrides"))
+-           .ToLocal(&custom_overrides) ||
++  if (!global->Get(context, co_key).ToLocal(&custom_overrides) ||
+       !custom_overrides->IsObject()) {
+     info.GetReturnValue().Set(result);
+     return;
+@@ -148,10 +148,10 @@ void GenericConstructorWrapper(
+ 
+   // Look up override.
+   v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Symbol> co_key =
++      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+   v8::Local<v8::Value> custom_overrides;
+-  if (!global
+-           ->Get(context, V8AtomicString(isolate, "customOverrides"))
+-           .ToLocal(&custom_overrides) ||
++  if (!global->Get(context, co_key).ToLocal(&custom_overrides) ||
+       !custom_overrides->IsObject()) {
+     info.GetReturnValue().Set(result);
+     return;
+@@ -731,15 +731,16 @@ void InstallIntersectionObserverOverrides(v8::Isolate* isolate,
+ }
+ 
+ // Pattern Y: Property existence spoofing.
+-// Reads window.customOverrides.propertyExistence and deletes properties from
++// Reads window[Symbol.for('__co')].propertyExistence and deletes properties from
+ // window (globals) and Navigator.prototype based on arrays in that object.
+ static void InstallPropertyExistenceOverrides(v8::Isolate* isolate,
+                                                v8::Local<v8::Context> context) {
+   v8::Local<v8::Object> global = context->Global();
+ 
++  v8::Local<v8::Symbol> co_key =
++      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+   v8::Local<v8::Value> co_val;
+-  if (!global->Get(context, V8AtomicString(isolate, "customOverrides"))
+-           .ToLocal(&co_val) ||
++  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+       !co_val->IsObject()) {
+     return;
+   }
+@@ -916,7 +917,7 @@ static void InstallPostMessageOverrides(v8::Isolate* isolate,
+ 
+ // Batch 20: Override property accessor getter callback (FunctionCallbackInfo).
+ // Used for adding new accessor properties whose values come from
+-// customOverrides. Throws TypeError when called on the prototype itself
++// Symbol.for('__co'). Throws TypeError when called on the prototype itself
+ // (matching native accessor behavior).
+ // data array: [interface_key, override_name, target_prototype]
+ void OverridePropertyAccessorGetter(
+@@ -942,10 +943,10 @@ void OverridePropertyAccessorGetter(
+   v8::Local<v8::String> override_name =
+       data->Get(context, 1u).ToLocalChecked().As<v8::String>();
+ 
++  v8::Local<v8::Symbol> co_key =
++      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+   v8::Local<v8::Value> co_val;
+-  if (!global
+-           ->Get(context, V8AtomicString(isolate, "customOverrides"))
+-           .ToLocal(&co_val) ||
++  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+       !co_val->IsObject()) {
+     return;
+   }
+@@ -993,10 +994,10 @@ void OverrideDataPropertyGetter(
+   v8::Local<v8::String> override_name =
+       data->Get(context, 1u).ToLocalChecked().As<v8::String>();
+ 
++  v8::Local<v8::Symbol> co_key =
++      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+   v8::Local<v8::Value> co_val;
+-  if (!global
+-           ->Get(context, V8AtomicString(isolate, "customOverrides"))
+-           .ToLocal(&co_val) ||
++  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+       !co_val->IsObject()) {
+     return;
+   }
+@@ -1103,10 +1104,10 @@ void GenericOverrideOnlyCallback(
+   v8::Local<v8::String> override_name =
+       data->Get(context, 1u).ToLocalChecked().As<v8::String>();
+ 
++  v8::Local<v8::Symbol> co_key =
++      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+   v8::Local<v8::Value> co_val;
+-  if (!global
+-           ->Get(context, V8AtomicString(isolate, "customOverrides"))
+-           .ToLocal(&co_val) ||
++  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+       !co_val->IsObject()) {
+     return;
+   }
+diff --git a/third_party/blink/renderer/platform/bindings/custom_override_helpers.h b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+index 31716e9ed6c44df469bad8ac9b9958332de6b7ea..0f78d25bb211013a704e0a21f03f098746e9abf6 100644
+--- a/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
++++ b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+@@ -11,8 +11,8 @@
+ 
+ namespace blink {
+ 
+-// Looks up a custom override function from the global customOverrides object.
+-// Path: window.customOverrides.{interface_key}.{override_name}
++// Looks up a custom override function from the global Symbol.for('__co') object.
++// Path: window[Symbol.for('__co')].{interface_key}.{override_name}
+ // Returns the function if found, or an empty handle if not.
+ // IMPORTANT: Caller must have an active v8::HandleScope.
+ inline v8::Local<v8::Function> GetCustomOverrideFunction(
+@@ -26,10 +26,10 @@ inline v8::Local<v8::Function> GetCustomOverrideFunction(
+   v8::Local<v8::Context> context = script_state->GetContext();
+   v8::Local<v8::Object> global = context->Global();
+ 
++  v8::Local<v8::Symbol> co_key =
++      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+   v8::Local<v8::Value> custom_overrides;
+-  if (!global
+-           ->Get(context, V8AtomicString(isolate, "customOverrides"))
+-           .ToLocal(&custom_overrides) ||
++  if (!global->Get(context, co_key).ToLocal(&custom_overrides) ||
+       !custom_overrides->IsObject())
+     return v8::Local<v8::Function>();
+ 
