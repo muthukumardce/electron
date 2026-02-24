@@ -1,0 +1,610 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Tue, 24 Feb 2026 17:54:53 +0530
+Subject: Migrate override storage from Symbol to V8 Private, add preload
+ registration bridge
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replace the visible Symbol.for('__co') override container with a V8 Private
+property (kCustomOverridesPrivateKey). V8 Private properties are completely
+invisible to JavaScript reflection (Object.getOwnPropertyNames/Symbols,
+Reflect.ownKeys, for...in, Proxy traps), making the override mechanism
+undetectable by web content.
+
+Key changes:
+
+custom_override_helpers.h:
+- Define kCustomOverridesPrivateKey ("__co_private") constant
+- GetCustomOverrideFunction now reads from global.GetPrivate() instead
+  of global.Get(Symbol.for('__co'))
+
+v8_builtin_overrides.cc:
+- Add shared helpers: GetPrivateOverrideContainer,
+  GetOrCreatePrivateOverrideContainer, LookupOverrideFromPrivate
+- Refactor GenericBuiltinWrapper, GenericConstructorWrapper,
+  OverridePropertyAccessorGetter, OverrideDataPropertyGetter,
+  GenericOverrideOnlyCallback, and InstallPropertyExistenceOverrides
+  to use the new Private-based lookup helpers (removes ~120 lines of
+  duplicated Symbol lookup boilerplate)
+- Add preload registration bridge functions:
+  __ro(iface, name, fn)  — register override function
+  __rov(iface, name, val) — register override value (e.g. arrays)
+  __rUA(data) — set UA override data via NavigatorUAData::setUA(),
+  self-destructs after first call
+- InstallOverrideRegistrationBridge installs these as non-enumerable,
+  configurable properties on the global; preload scripts call them to
+  populate the Private container, then delete them when done
+
+navigator_ua_data.idl:
+- Remove setUA() from the web-exposed IDL surface; it is now called
+  exclusively via the __rUA C++ bridge function, preventing web content
+  from detecting or calling it
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 16cb2af03a258b4b61f2ac91e3151d48daad724d..57719e016fb2b995daa0aa3dfb12d1ae30379385 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -4,6 +4,13 @@
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h"
+ 
++#include "third_party/blink/renderer/bindings/core/v8/native_value_traits.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_navigator_ua_data.h"
++#include "third_party/blink/renderer/bindings/core/v8/v8_ua_override_values.h"
++#include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
++#include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
++#include "third_party/blink/renderer/platform/bindings/exception_state.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
+ #include "v8/include/v8.h"
+@@ -16,9 +23,67 @@ constexpr int kDataOriginalFn = 0;
+ constexpr int kDataInterfaceKey = 1;
+ constexpr int kDataOverrideName = 2;
+ 
++// Helper: Get the V8 Private override container from the global object.
++// Returns empty handle if not found.
++v8::Local<v8::Object> GetPrivateOverrideContainer(
++    v8::Isolate* isolate,
++    v8::Local<v8::Context> context) {
++  v8::Local<v8::Private> key = v8::Private::ForApi(
++      isolate, V8AtomicString(isolate, kCustomOverridesPrivateKey));
++  v8::Local<v8::Value> container;
++  if (!context->Global()->GetPrivate(context, key).ToLocal(&container) ||
++      !container->IsObject()) {
++    return v8::Local<v8::Object>();
++  }
++  return container.As<v8::Object>();
++}
++
++// Helper: Get or create the V8 Private override container.
++v8::Local<v8::Object> GetOrCreatePrivateOverrideContainer(
++    v8::Isolate* isolate,
++    v8::Local<v8::Context> context) {
++  v8::Local<v8::Private> key = v8::Private::ForApi(
++      isolate, V8AtomicString(isolate, kCustomOverridesPrivateKey));
++  v8::Local<v8::Object> global = context->Global();
++  v8::Local<v8::Value> container;
++  if (global->GetPrivate(context, key).ToLocal(&container) &&
++      container->IsObject()) {
++    return container.As<v8::Object>();
++  }
++  v8::Local<v8::Object> new_container = v8::Object::New(isolate);
++  global->SetPrivate(context, key, new_container).Check();
++  return new_container;
++}
++
++// Helper: Look up override function from V8 Private container.
++// Shared by GenericBuiltinWrapper, GenericConstructorWrapper, etc.
++v8::Local<v8::Value> LookupOverrideFromPrivate(
++    v8::Isolate* isolate,
++    v8::Local<v8::Context> context,
++    v8::Local<v8::String> interface_key,
++    v8::Local<v8::String> override_name) {
++  v8::Local<v8::Object> container =
++      GetPrivateOverrideContainer(isolate, context);
++  if (container.IsEmpty())
++    return v8::Local<v8::Value>();
++
++  v8::Local<v8::Value> iface;
++  if (!container->Get(context, interface_key).ToLocal(&iface) ||
++      !iface->IsObject())
++    return v8::Local<v8::Value>();
++
++  v8::Local<v8::Value> override_val;
++  if (!iface.As<v8::Object>()
++           ->Get(context, override_name)
++           .ToLocal(&override_val))
++    return v8::Local<v8::Value>();
++
++  return override_val;
++}
++
+ // Generic wrapper callback for V8 built-in functions.
+ // Called when a wrapped function (e.g. Math.cos) is invoked from JS.
+-// Calls the original, then checks window[Symbol.for('__co')] for an override.
++// Calls the original, then checks the V8 Private override container.
+ void GenericBuiltinWrapper(const v8::FunctionCallbackInfo<v8::Value>& info) {
+   v8::Isolate* isolate = info.GetIsolate();
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+@@ -44,35 +109,15 @@ void GenericBuiltinWrapper(const v8::FunctionCallbackInfo<v8::Value>& info) {
+     return;
+   }
+ 
+-  // Look up override: window[Symbol.for('__co')][interfaceKey][overrideName]
+-  v8::Local<v8::Object> global = context->Global();
+-  v8::Local<v8::Symbol> co_key =
+-      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+-  v8::Local<v8::Value> custom_overrides;
+-  if (!global->Get(context, co_key).ToLocal(&custom_overrides) ||
+-      !custom_overrides->IsObject()) {
+-    info.GetReturnValue().Set(result);
+-    return;
+-  }
+-
++  // Look up override from V8 Private container (invisible to JS).
+   v8::Local<v8::String> interface_key =
+       data->Get(context, kDataInterfaceKey).ToLocalChecked().As<v8::String>();
+-  v8::Local<v8::Value> iface;
+-  if (!custom_overrides.As<v8::Object>()
+-           ->Get(context, interface_key)
+-           .ToLocal(&iface) ||
+-      !iface->IsObject()) {
+-    info.GetReturnValue().Set(result);
+-    return;
+-  }
+-
+   v8::Local<v8::String> override_name =
+       data->Get(context, kDataOverrideName).ToLocalChecked().As<v8::String>();
+-  v8::Local<v8::Value> override_fn_val;
+-  if (!iface.As<v8::Object>()
+-           ->Get(context, override_name)
+-           .ToLocal(&override_fn_val) ||
+-      !override_fn_val->IsFunction()) {
++
++  v8::Local<v8::Value> override_fn_val =
++      LookupOverrideFromPrivate(isolate, context, interface_key, override_name);
++  if (override_fn_val.IsEmpty() || !override_fn_val->IsFunction()) {
+     info.GetReturnValue().Set(result);
+     return;
+   }
+@@ -146,35 +191,15 @@ void GenericConstructorWrapper(
+     }
+   }
+ 
+-  // Look up override.
+-  v8::Local<v8::Object> global = context->Global();
+-  v8::Local<v8::Symbol> co_key =
+-      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+-  v8::Local<v8::Value> custom_overrides;
+-  if (!global->Get(context, co_key).ToLocal(&custom_overrides) ||
+-      !custom_overrides->IsObject()) {
+-    info.GetReturnValue().Set(result);
+-    return;
+-  }
+-
++  // Look up override from V8 Private container (invisible to JS).
+   v8::Local<v8::String> interface_key =
+       data->Get(context, kDataInterfaceKey).ToLocalChecked().As<v8::String>();
+-  v8::Local<v8::Value> iface;
+-  if (!custom_overrides.As<v8::Object>()
+-           ->Get(context, interface_key)
+-           .ToLocal(&iface) ||
+-      !iface->IsObject()) {
+-    info.GetReturnValue().Set(result);
+-    return;
+-  }
+-
+   v8::Local<v8::String> override_name =
+       data->Get(context, kDataOverrideName).ToLocalChecked().As<v8::String>();
+-  v8::Local<v8::Value> override_fn_val;
+-  if (!iface.As<v8::Object>()
+-           ->Get(context, override_name)
+-           .ToLocal(&override_fn_val) ||
+-      !override_fn_val->IsFunction()) {
++
++  v8::Local<v8::Value> override_fn_val =
++      LookupOverrideFromPrivate(isolate, context, interface_key, override_name);
++  if (override_fn_val.IsEmpty() || !override_fn_val->IsFunction()) {
+     info.GetReturnValue().Set(result);
+     return;
+   }
+@@ -731,23 +756,20 @@ void InstallIntersectionObserverOverrides(v8::Isolate* isolate,
+ }
+ 
+ // Pattern Y: Property existence spoofing.
+-// Reads window[Symbol.for('__co')].propertyExistence and deletes properties from
++// Reads the V8 Private container's propertyExistence and deletes properties from
+ // window (globals) and Navigator.prototype based on arrays in that object.
+ static void InstallPropertyExistenceOverrides(v8::Isolate* isolate,
+                                                v8::Local<v8::Context> context) {
+   v8::Local<v8::Object> global = context->Global();
+ 
+-  v8::Local<v8::Symbol> co_key =
+-      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+-  v8::Local<v8::Value> co_val;
+-  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+-      !co_val->IsObject()) {
++  // Read from V8 Private container (invisible to JS).
++  v8::Local<v8::Object> container =
++      GetPrivateOverrideContainer(isolate, context);
++  if (container.IsEmpty())
+     return;
+-  }
+ 
+   v8::Local<v8::Value> pe_val;
+-  if (!co_val.As<v8::Object>()
+-           ->Get(context, V8AtomicString(isolate, "propertyExistence"))
++  if (!container->Get(context, V8AtomicString(isolate, "propertyExistence"))
+            .ToLocal(&pe_val) ||
+       !pe_val->IsObject()) {
+     return;
+@@ -917,7 +939,7 @@ static void InstallPostMessageOverrides(v8::Isolate* isolate,
+ 
+ // Batch 20: Override property accessor getter callback (FunctionCallbackInfo).
+ // Used for adding new accessor properties whose values come from
+-// Symbol.for('__co'). Throws TypeError when called on the prototype itself
++// V8 Private container. Throws TypeError when called on the prototype itself
+ // (matching native accessor behavior).
+ // data array: [interface_key, override_name, target_prototype]
+ void OverridePropertyAccessorGetter(
+@@ -937,33 +959,15 @@ void OverridePropertyAccessorGetter(
+     return;
+   }
+ 
+-  v8::Local<v8::Object> global = context->Global();
+   v8::Local<v8::String> iface_key =
+       data->Get(context, 0u).ToLocalChecked().As<v8::String>();
+   v8::Local<v8::String> override_name =
+       data->Get(context, 1u).ToLocalChecked().As<v8::String>();
+ 
+-  v8::Local<v8::Symbol> co_key =
+-      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+-  v8::Local<v8::Value> co_val;
+-  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+-      !co_val->IsObject()) {
++  v8::Local<v8::Value> override_val =
++      LookupOverrideFromPrivate(isolate, context, iface_key, override_name);
++  if (override_val.IsEmpty() || override_val->IsUndefined())
+     return;
+-  }
+-  v8::Local<v8::Value> iface_val;
+-  if (!co_val.As<v8::Object>()
+-           ->Get(context, iface_key)
+-           .ToLocal(&iface_val) ||
+-      !iface_val->IsObject()) {
+-    return;
+-  }
+-  v8::Local<v8::Value> override_val;
+-  if (!iface_val.As<v8::Object>()
+-           ->Get(context, override_name)
+-           .ToLocal(&override_val) ||
+-      override_val->IsUndefined()) {
+-    return;
+-  }
+ 
+   if (override_val->IsFunction()) {
+     v8::TryCatch try_catch(isolate);
+@@ -986,7 +990,6 @@ void OverrideDataPropertyGetter(
+     const v8::PropertyCallbackInfo<v8::Value>& info) {
+   v8::Isolate* isolate = info.GetIsolate();
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+-  v8::Local<v8::Object> global = context->Global();
+ 
+   v8::Local<v8::Array> data = info.Data().As<v8::Array>();
+   v8::Local<v8::String> iface_key =
+@@ -994,27 +997,10 @@ void OverrideDataPropertyGetter(
+   v8::Local<v8::String> override_name =
+       data->Get(context, 1u).ToLocalChecked().As<v8::String>();
+ 
+-  v8::Local<v8::Symbol> co_key =
+-      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+-  v8::Local<v8::Value> co_val;
+-  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+-      !co_val->IsObject()) {
+-    return;
+-  }
+-  v8::Local<v8::Value> iface_val;
+-  if (!co_val.As<v8::Object>()
+-           ->Get(context, iface_key)
+-           .ToLocal(&iface_val) ||
+-      !iface_val->IsObject()) {
+-    return;
+-  }
+-  v8::Local<v8::Value> override_val;
+-  if (!iface_val.As<v8::Object>()
+-           ->Get(context, override_name)
+-           .ToLocal(&override_val) ||
+-      override_val->IsUndefined()) {
++  v8::Local<v8::Value> override_val =
++      LookupOverrideFromPrivate(isolate, context, iface_key, override_name);
++  if (override_val.IsEmpty() || override_val->IsUndefined())
+     return;
+-  }
+ 
+   if (override_val->IsFunction()) {
+     v8::TryCatch try_catch(isolate);
+@@ -1096,7 +1082,6 @@ void GenericOverrideOnlyCallback(
+     const v8::FunctionCallbackInfo<v8::Value>& info) {
+   v8::Isolate* isolate = info.GetIsolate();
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+-  v8::Local<v8::Object> global = context->Global();
+ 
+   v8::Local<v8::Array> data = info.Data().As<v8::Array>();
+   v8::Local<v8::String> iface_key =
+@@ -1104,27 +1089,10 @@ void GenericOverrideOnlyCallback(
+   v8::Local<v8::String> override_name =
+       data->Get(context, 1u).ToLocalChecked().As<v8::String>();
+ 
+-  v8::Local<v8::Symbol> co_key =
+-      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
+-  v8::Local<v8::Value> co_val;
+-  if (!global->Get(context, co_key).ToLocal(&co_val) ||
+-      !co_val->IsObject()) {
+-    return;
+-  }
+-  v8::Local<v8::Value> iface_val;
+-  if (!co_val.As<v8::Object>()
+-           ->Get(context, iface_key)
+-           .ToLocal(&iface_val) ||
+-      !iface_val->IsObject()) {
+-    return;
+-  }
+-  v8::Local<v8::Value> override_fn_val;
+-  if (!iface_val.As<v8::Object>()
+-           ->Get(context, override_name)
+-           .ToLocal(&override_fn_val) ||
+-      !override_fn_val->IsFunction()) {
++  v8::Local<v8::Value> override_fn_val =
++      LookupOverrideFromPrivate(isolate, context, iface_key, override_name);
++  if (override_fn_val.IsEmpty() || !override_fn_val->IsFunction())
+     return;
+-  }
+ 
+   int argc = info.Length();
+   std::vector<v8::Local<v8::Value>> argv(argc);
+@@ -1511,6 +1479,168 @@ void InstallBatch20Overrides(v8::Isolate* isolate,
+   }
+ }
+ 
++// === BRIDGE FUNCTIONS ===
++// These temporary functions are installed on the global object so that preload
++// scripts can register overrides into the V8 Private container.  They are
++// deleted after preload completes, making them invisible to web content.
++
++// __ro(interfaceKey, overrideName, fn)  — register override function
++void RegisterOverrideCallback(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++
++  if (info.Length() < 3 || !info[0]->IsString() || !info[1]->IsString() ||
++      !info[2]->IsFunction())
++    return;
++
++  v8::Local<v8::Object> container =
++      GetOrCreatePrivateOverrideContainer(isolate, context);
++
++  // Get or create interface bucket.
++  v8::Local<v8::String> iface_key = info[0].As<v8::String>();
++  v8::Local<v8::Value> iface_val;
++  if (!container->Get(context, iface_key).ToLocal(&iface_val))
++    return;
++
++  v8::Local<v8::Object> iface;
++  if (iface_val->IsObject()) {
++    iface = iface_val.As<v8::Object>();
++  } else {
++    iface = v8::Object::New(isolate);
++    container->Set(context, iface_key, iface).Check();
++  }
++
++  // Store the override function.
++  iface->Set(context, info[1].As<v8::String>(), info[2]).Check();
++}
++
++// __rov(interfaceKey, overrideName, value)  — register override value
++// (for propertyExistence arrays and other non-function values)
++void RegisterOverrideValueCallback(
++    const v8::FunctionCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++
++  if (info.Length() < 3 || !info[0]->IsString() || !info[1]->IsString())
++    return;
++
++  v8::Local<v8::Object> container =
++      GetOrCreatePrivateOverrideContainer(isolate, context);
++
++  v8::Local<v8::String> iface_key = info[0].As<v8::String>();
++  v8::Local<v8::Value> iface_val;
++  if (!container->Get(context, iface_key).ToLocal(&iface_val))
++    return;
++
++  v8::Local<v8::Object> iface;
++  if (iface_val->IsObject()) {
++    iface = iface_val.As<v8::Object>();
++  } else {
++    iface = v8::Object::New(isolate);
++    container->Set(context, iface_key, iface).Check();
++  }
++
++  iface->Set(context, info[1].As<v8::String>(), info[2]).Check();
++}
++
++// __rUA(data)  — register UA data via NavigatorUAData::setUA() internally,
++// then self-destruct.
++void RegisterUACallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
++  v8::Isolate* isolate = info.GetIsolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++
++  if (info.Length() < 1 || !info[0]->IsObject())
++    return;
++
++  v8::Local<v8::Object> global = context->Global();
++
++  // Find the NavigatorUAData object and call setUA() on it internally.
++  // Navigate: window.navigator.userAgentData
++  v8::Local<v8::Value> nav_val;
++  if (!global->Get(context, V8AtomicString(isolate, "navigator"))
++           .ToLocal(&nav_val) ||
++      !nav_val->IsObject())
++    return;
++
++  v8::Local<v8::Value> ua_data_val;
++  if (!nav_val.As<v8::Object>()
++           ->Get(context, V8AtomicString(isolate, "userAgentData"))
++           .ToLocal(&ua_data_val) ||
++      !ua_data_val->IsObject())
++    return;
++
++  // Get the NavigatorUAData C++ object and call setUA() directly.
++  // Since we removed setUA from IDL, we need to call the internal
++  // C++ method. We achieve this by temporarily re-exposing a hidden
++  // method on the userAgentData object that delegates to C++.
++  //
++  // Actually, the simplest approach: just put the data into the
++  // UAOverrideManager directly from here. We need the ExecutionContext.
++  ScriptState* script_state = ScriptState::ForCurrentRealm(info);
++  if (!script_state || !script_state->ContextIsValid())
++    return;
++
++  ExecutionContext* execution_context = ExecutionContext::From(script_state);
++  if (!execution_context)
++    return;
++
++  // Navigate to the NavigatorUAData wrapper and unwrap it.
++  NavigatorUAData* ua_data_obj =
++      V8NavigatorUAData::ToWrappable(isolate, ua_data_val);
++  if (!ua_data_obj)
++    return;
++
++  // Build a UAOverrideValues from the JS object.
++  // We need to use the generated V8 binding to convert.
++  ExceptionState exception_state(isolate, ExceptionContext(
++      v8::ExceptionContext::kOperation, "NavigatorUAData", "setUA"));
++  UAOverrideValues* override_values =
++      NativeValueTraits<UAOverrideValues>::NativeValue(
++          isolate, info[0], exception_state);
++  if (exception_state.HadException())
++    return;
++
++  ua_data_obj->setUA(override_values);
++
++  // Self-destruct: delete __rUA from global.
++  std::ignore = global->Delete(context, V8AtomicString(isolate, "__rUA"));
++}
++
++// Install the __ro, __rov, __rUA bridge functions on the global object.
++void InstallOverrideRegistrationBridge(v8::Isolate* isolate,
++                                        v8::Local<v8::Context> context) {
++  v8::Local<v8::Object> global = context->Global();
++
++  // __ro(iface, name, fn)
++  v8::Local<v8::Function> ro_fn =
++      v8::Function::New(context, RegisterOverrideCallback).ToLocalChecked();
++  v8::PropertyDescriptor ro_desc(ro_fn, false);
++  ro_desc.set_enumerable(false);
++  ro_desc.set_configurable(true);
++  global->DefineProperty(context, V8AtomicString(isolate, "__ro"), ro_desc)
++      .Check();
++
++  // __rov(iface, name, value)
++  v8::Local<v8::Function> rov_fn =
++      v8::Function::New(context, RegisterOverrideValueCallback)
++          .ToLocalChecked();
++  v8::PropertyDescriptor rov_desc(rov_fn, false);
++  rov_desc.set_enumerable(false);
++  rov_desc.set_configurable(true);
++  global->DefineProperty(context, V8AtomicString(isolate, "__rov"), rov_desc)
++      .Check();
++
++  // __rUA(data) — self-destructs after first call
++  v8::Local<v8::Function> rua_fn =
++      v8::Function::New(context, RegisterUACallback).ToLocalChecked();
++  v8::PropertyDescriptor rua_desc(rua_fn, false);
++  rua_desc.set_enumerable(false);
++  rua_desc.set_configurable(true);
++  global->DefineProperty(context, V8AtomicString(isolate, "__rUA"), rua_desc)
++      .Check();
++}
++
+ }  // namespace
+ 
+ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+@@ -1527,6 +1657,11 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+       isolate, context->GetMicrotaskQueue(),
+       v8::MicrotasksScope::kDoNotRunMicrotasks);
+ 
++  // Install the override registration bridge (__ro, __rov, __rUA) first.
++  // Preload scripts call these to register overrides into V8 Private storage.
++  // They are deleted by the last preload script after all overrides are set.
++  InstallOverrideRegistrationBridge(isolate, context);
++
+   InstallMathOverrides(isolate, context);
+   InstallDateOverrides(isolate, context);
+   InstallFunctionOverrides(isolate, context);
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h
+index 26a34496d64401bcba293a7a42e8e37564879bcd..f07dc1435c7792d620c7c6f3a8991d6e7c3a7497 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h
+@@ -10,7 +10,8 @@ namespace blink {
+ class ScriptState;
+ 
+ // Installs V8-level wrappers for built-in functions (Math, Date, Error, etc.)
+-// that check window.customOverrides at call time.
++// that check the V8 Private override container at call time.
++// Also installs the __ro/__rov/__rUA bridge functions for preload registration.
+ // Must be called after InstallConditionalFeatures(), main world only.
+ void InstallV8BuiltinOverrides(ScriptState* script_state);
+ 
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.idl b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+index 5edea99a23c443fb62c40dc2578639eb390e9965..889666d9ba703076f3ae51674b3ed329af4c3c0e 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.idl
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.idl
+@@ -45,6 +45,5 @@ dictionary UAOverrideValues {
+   [CallWith=ScriptState, MeasureAs=NavigatorUAData_GetHighEntropyValues] Promise<UADataValues> getHighEntropyValues(sequence<DOMString> hints);
+   [CallWith=ScriptState, MeasureAs=NavigatorUAData_toJSON] object toJSON();
+ 
+-  // Custom method to override UA values
+-  void setUA(UAOverrideValues overrideValues);
++  // setUA() removed from IDL — now called via __rUA bridge (C++ internal only)
+ };
+diff --git a/third_party/blink/renderer/platform/bindings/custom_override_helpers.h b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+index 0f78d25bb211013a704e0a21f03f098746e9abf6..c5831218cc8028888d9b4177f24c15d247f3f183 100644
+--- a/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
++++ b/third_party/blink/renderer/platform/bindings/custom_override_helpers.h
+@@ -11,8 +11,14 @@
+ 
+ namespace blink {
+ 
+-// Looks up a custom override function from the global Symbol.for('__co') object.
+-// Path: window[Symbol.for('__co')].{interface_key}.{override_name}
++// The private key name used for the override container.
++// V8 Private properties are completely invisible to JavaScript reflection:
++// Object.getOwnPropertyNames/Symbols, Reflect.ownKeys, for...in, etc.
++// Only C++ code can read/write them.
++inline const char* kCustomOverridesPrivateKey = "__co_private";
++
++// Looks up a custom override function from a V8 Private property on the global.
++// Path: global[Private("__co_private")].{interface_key}.{override_name}
+ // Returns the function if found, or an empty handle if not.
+ // IMPORTANT: Caller must have an active v8::HandleScope.
+ inline v8::Local<v8::Function> GetCustomOverrideFunction(
+@@ -26,10 +32,11 @@ inline v8::Local<v8::Function> GetCustomOverrideFunction(
+   v8::Local<v8::Context> context = script_state->GetContext();
+   v8::Local<v8::Object> global = context->Global();
+ 
+-  v8::Local<v8::Symbol> co_key =
+-      v8::Symbol::For(isolate, V8AtomicString(isolate, "__co"));
++  // Read from V8 Private property (invisible to JS)
++  v8::Local<v8::Private> co_key =
++      v8::Private::ForApi(isolate, V8AtomicString(isolate, kCustomOverridesPrivateKey));
+   v8::Local<v8::Value> custom_overrides;
+-  if (!global->Get(context, co_key).ToLocal(&custom_overrides) ||
++  if (!global->GetPrivate(context, co_key).ToLocal(&custom_overrides) ||
+       !custom_overrides->IsObject())
+     return v8::Local<v8::Function>();
+ 
