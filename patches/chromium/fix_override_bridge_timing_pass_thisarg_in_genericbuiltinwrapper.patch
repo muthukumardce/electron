@@ -1,0 +1,424 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <mk@verveflux.com>
+Date: Tue, 24 Feb 2026 20:44:15 +0530
+Subject: Fix override bridge timing, pass thisArg in GenericBuiltinWrapper,
+ rewrite __rUA registration
+
+Three related fixes for the override hook system:
+
+1. Bridge timing: Split InstallV8BuiltinOverrides into two phases:
+   - InstallOverrideBridge() installs __ro/__rov/__rUA BEFORE
+     DidCreateScriptContext, so preload scripts can register overrides
+     via contextBridge.executeInMainWorld() during context creation
+   - InstallV8BuiltinOverrides() installs V8 built-in wrappers (Math,
+     Date, etc.) AFTER, so overrides are already registered when
+     wrappers start intercepting calls
+
+2. GenericBuiltinWrapper now appends info.This() as the last argument
+   to override callbacks: (result, ...originalArgs, thisArg). This
+   allows Date prototype method overrides (toString, getTimezoneOffset,
+   etc.) to access the Date instance for per-tab timezone reformatting.
+   Backwards-compatible since existing overrides ignore extra trailing args.
+
+3. Rewrite RegisterUACallback (__rUA) to read JS object fields manually
+   instead of using NativeValueTraits<UAOverrideValues>, populating
+   UAOverrideManager storage directly. Sets fallback storage so service
+   workers and new frames inherit overrides.
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
+index 5b7c0f22aafcba7043a3014237b7a8f18041a1e3..e4f035c61a65ab15af953a08be134ea7bf4e63cd 100644
+--- a/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
++++ b/third_party/blink/renderer/bindings/core/v8/local_window_proxy.cc
+@@ -208,6 +208,14 @@ void LocalWindowProxy::Initialize() {
+     SetSecurityToken(origin.get());
+   }
+ 
++  // Install __ro/__rov/__rUA bridge BEFORE DidCreateScriptContext.
++  // DidCreateScriptContext triggers Electron to create the isolated world
++  // and run the preload, which calls contextBridge.executeInMainWorld()
++  // to register overrides via these bridge functions.
++  if (World().IsMainWorld()) {
++    InstallOverrideBridge(script_state_);
++  }
++
+   {
+     TRACE_EVENT2("v8", "ContextCreatedNotification", "IsMainFrame",
+                  GetFrame()->IsMainFrame(), "IsOutermostMainFrame",
+@@ -220,7 +228,8 @@ void LocalWindowProxy::Initialize() {
+   InstallConditionalFeatures();
+   GetFrame()->Client()->DidInstallConditionalFeatures(context, world_->GetWorldId());
+ 
+-  // Install V8 built-in override wrappers (Math, Date, etc.) - main world only.
++  // Install V8 built-in wrappers (Math, Date, etc.) AFTER preload has
++  // registered overrides via the bridge.
+   if (World().IsMainWorld()) {
+     InstallV8BuiltinOverrides(script_state_);
+   }
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 57719e016fb2b995daa0aa3dfb12d1ae30379385..a0f37df43d5ef923fdb13070f4ae14b43577070d 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -4,9 +4,7 @@
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h"
+ 
+-#include "third_party/blink/renderer/bindings/core/v8/native_value_traits.h"
+-#include "third_party/blink/renderer/bindings/core/v8/v8_navigator_ua_data.h"
+-#include "third_party/blink/renderer/bindings/core/v8/v8_ua_override_values.h"
++#include "base/logging.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/platform/bindings/custom_override_helpers.h"
+@@ -122,18 +120,21 @@ void GenericBuiltinWrapper(const v8::FunctionCallbackInfo<v8::Value>& info) {
+     return;
+   }
+ 
+-  // Call override with (originalResult, ...originalArgs).
++  // Call override with (originalResult, ...originalArgs, thisArg).
++  // The thisArg is appended last so overrides that need the receiver
++  // (e.g. Date.prototype.toString needs the Date instance) can access it.
+   v8::Local<v8::Function> override_fn = override_fn_val.As<v8::Function>();
+-  std::vector<v8::Local<v8::Value>> override_argv(argc + 1);
++  std::vector<v8::Local<v8::Value>> override_argv(argc + 2);
+   override_argv[0] = result;
+   for (int i = 0; i < argc; i++) {
+     override_argv[i + 1] = info[i];
+   }
++  override_argv[argc + 1] = info.This();
+ 
+   v8::TryCatch override_try_catch(isolate);
+   v8::Local<v8::Value> override_result;
+   if (!override_fn
+-           ->Call(context, v8::Undefined(isolate), argc + 1,
++           ->Call(context, v8::Undefined(isolate), argc + 2,
+                   override_argv.data())
+            .ToLocal(&override_result)) {
+     // Override threw — fall back to original result.
+@@ -1491,8 +1492,17 @@ void RegisterOverrideCallback(
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+ 
+   if (info.Length() < 3 || !info[0]->IsString() || !info[1]->IsString() ||
+-      !info[2]->IsFunction())
++      !info[2]->IsFunction()) {
++    fprintf(stderr, "[__ro] BAIL: bad args\n");
++    fflush(stderr);
+     return;
++  }
++  {
++    std::string iface = ToCoreString(isolate, info[0].As<v8::String>()).Utf8();
++    std::string name = ToCoreString(isolate, info[1].As<v8::String>()).Utf8();
++    fprintf(stderr, "[__ro] %s.%s\n", iface.c_str(), name.c_str());
++    fflush(stderr);
++  }
+ 
+   v8::Local<v8::Object> container =
+       GetOrCreatePrivateOverrideContainer(isolate, context);
+@@ -1522,8 +1532,17 @@ void RegisterOverrideValueCallback(
+   v8::Isolate* isolate = info.GetIsolate();
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+ 
+-  if (info.Length() < 3 || !info[0]->IsString() || !info[1]->IsString())
++  if (info.Length() < 3 || !info[0]->IsString() || !info[1]->IsString()) {
++    fprintf(stderr, "[__rov] BAIL: bad args\n");
++    fflush(stderr);
+     return;
++  }
++  {
++    std::string iface = ToCoreString(isolate, info[0].As<v8::String>()).Utf8();
++    std::string name = ToCoreString(isolate, info[1].As<v8::String>()).Utf8();
++    fprintf(stderr, "[__rov] %s.%s\n", iface.c_str(), name.c_str());
++    fflush(stderr);
++  }
+ 
+   v8::Local<v8::Object> container =
+       GetOrCreatePrivateOverrideContainer(isolate, context);
+@@ -1544,66 +1563,172 @@ void RegisterOverrideValueCallback(
+   iface->Set(context, info[1].As<v8::String>(), info[2]).Check();
+ }
+ 
+-// __rUA(data)  — register UA data via NavigatorUAData::setUA() internally,
+-// then self-destruct.
++// Helpers for reading JS object fields in RegisterUACallback.
++String ReadStringField(v8::Isolate* isolate, v8::Local<v8::Context> context,
++                       v8::Local<v8::Object> obj, const char* key) {
++  v8::Local<v8::Value> val;
++  if (!obj->Get(context, V8AtomicString(isolate, key)).ToLocal(&val) ||
++      !val->IsString())
++    return String();
++  return ToCoreString(isolate, val.As<v8::String>());
++}
++
++// __rUA(data)  — register UA overrides via UAOverrideManager directly.
++// Reads JS object fields manually (no NativeValueTraits) for reliability.
++// Self-destructs after call.
+ void RegisterUACallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
+   v8::Isolate* isolate = info.GetIsolate();
+   v8::Local<v8::Context> context = isolate->GetCurrentContext();
+ 
+-  if (info.Length() < 1 || !info[0]->IsObject())
+-    return;
+-
+-  v8::Local<v8::Object> global = context->Global();
++  LOG(WARNING) << "[__rUA] RegisterUACallback called, argc=" << info.Length();
+ 
+-  // Find the NavigatorUAData object and call setUA() on it internally.
+-  // Navigate: window.navigator.userAgentData
+-  v8::Local<v8::Value> nav_val;
+-  if (!global->Get(context, V8AtomicString(isolate, "navigator"))
+-           .ToLocal(&nav_val) ||
+-      !nav_val->IsObject())
++  if (info.Length() < 1 || !info[0]->IsObject()) {
++    LOG(WARNING) << "[__rUA] BAIL: bad args";
+     return;
++  }
+ 
+-  v8::Local<v8::Value> ua_data_val;
+-  if (!nav_val.As<v8::Object>()
+-           ->Get(context, V8AtomicString(isolate, "userAgentData"))
+-           .ToLocal(&ua_data_val) ||
+-      !ua_data_val->IsObject())
+-    return;
++  v8::Local<v8::Object> data = info[0].As<v8::Object>();
+ 
+-  // Get the NavigatorUAData C++ object and call setUA() directly.
+-  // Since we removed setUA from IDL, we need to call the internal
+-  // C++ method. We achieve this by temporarily re-exposing a hidden
+-  // method on the userAgentData object that delegates to C++.
+-  //
+-  // Actually, the simplest approach: just put the data into the
+-  // UAOverrideManager directly from here. We need the ExecutionContext.
+   ScriptState* script_state = ScriptState::ForCurrentRealm(info);
+-  if (!script_state || !script_state->ContextIsValid())
++  if (!script_state || !script_state->ContextIsValid()) {
++    LOG(WARNING) << "[__rUA] BAIL: script_state invalid";
+     return;
++  }
+ 
+   ExecutionContext* execution_context = ExecutionContext::From(script_state);
+-  if (!execution_context)
++  if (!execution_context) {
++    LOG(WARNING) << "[__rUA] BAIL: no execution_context";
+     return;
++  }
+ 
+-  // Navigate to the NavigatorUAData wrapper and unwrap it.
+-  NavigatorUAData* ua_data_obj =
+-      V8NavigatorUAData::ToWrappable(isolate, ua_data_val);
+-  if (!ua_data_obj)
++  base::UnguessableToken cluster_id = execution_context->GetAgentClusterID();
++  LOG(WARNING) << "[__rUA] cluster_id="
++               << (cluster_id.is_empty() ? "EMPTY" : cluster_id.ToString());
++  if (cluster_id.is_empty()) {
++    LOG(WARNING) << "[__rUA] BAIL: cluster_id empty";
+     return;
++  }
+ 
+-  // Build a UAOverrideValues from the JS object.
+-  // We need to use the generated V8 binding to convert.
+-  ExceptionState exception_state(isolate, ExceptionContext(
+-      v8::ExceptionContext::kOperation, "NavigatorUAData", "setUA"));
+-  UAOverrideValues* override_values =
+-      NativeValueTraits<UAOverrideValues>::NativeValue(
+-          isolate, info[0], exception_state);
+-  if (exception_state.HadException())
++  UAOverrideValues_Storage* storage =
++      UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
++  if (!storage) {
++    LOG(WARNING) << "[__rUA] BAIL: null storage";
+     return;
++  }
+ 
+-  ua_data_obj->setUA(override_values);
++  storage->has_override = true;
++  UAOverrideManager::GetInstance().SetFallbackStorage(storage);
++  LOG(WARNING) << "[__rUA] SUCCESS: fallback set, populating fields...";
++
++  // Read brand arrays: [{brand: string, version: string}, ...]
++  auto ReadBrands = [&](const char* field_name,
++      Vector<std::pair<String, String>>& target) {
++    v8::Local<v8::Value> arr_val;
++    if (!data->Get(context, V8AtomicString(isolate, field_name))
++             .ToLocal(&arr_val) ||
++        !arr_val->IsArray())
++      return;
++    v8::Local<v8::Array> arr = arr_val.As<v8::Array>();
++    target.clear();
++    for (uint32_t i = 0; i < arr->Length(); i++) {
++      v8::Local<v8::Value> elem;
++      if (!arr->Get(context, i).ToLocal(&elem) || !elem->IsObject())
++        continue;
++      v8::Local<v8::Object> brand_obj = elem.As<v8::Object>();
++      String brand = ReadStringField(isolate, context, brand_obj, "brand");
++      String version = ReadStringField(isolate, context, brand_obj, "version");
++      target.push_back(std::make_pair(brand, version));
++    }
++  };
++
++  ReadBrands("brands", storage->override_brands);
++  ReadBrands("fullVersionList", storage->override_full_version_list);
++
++  // Read simple string fields.
++  auto ReadStr = [&](const char* js_key, std::optional<String>& target) {
++    v8::Local<v8::Value> val;
++    if (data->Get(context, V8AtomicString(isolate, js_key)).ToLocal(&val) &&
++        val->IsString()) {
++      target = ToCoreString(isolate, val.As<v8::String>());
++    }
++  };
++
++  ReadStr("platform", storage->override_platform);
++  ReadStr("platformVersion", storage->override_platform_version);
++  ReadStr("architecture", storage->override_architecture);
++  ReadStr("model", storage->override_model);
++  ReadStr("uaFullVersion", storage->override_ua_full_version);
++  ReadStr("bitness", storage->override_bitness);
++  ReadStr("userAgent", storage->override_user_agent);
++  ReadStr("navigatorPlatform", storage->override_navigator_platform);
++  ReadStr("language", storage->override_language);
++  ReadStr("connectionType", storage->override_connection_type);
++  ReadStr("connectionEffectiveType", storage->override_connection_effective_type);
++  ReadStr("gpuRenderer", storage->override_gpu_renderer);
++  ReadStr("gpuVendor", storage->override_gpu_vendor);
++
++  // Read boolean fields.
++  auto ReadBool = [&](const char* js_key, std::optional<bool>& target) {
++    v8::Local<v8::Value> val;
++    if (data->Get(context, V8AtomicString(isolate, js_key)).ToLocal(&val) &&
++        val->IsBoolean()) {
++      target = val.As<v8::Boolean>()->Value();
++    }
++  };
++
++  ReadBool("mobile", storage->override_mobile);
++  ReadBool("onLine", storage->override_on_line);
++  ReadBool("wow64", storage->override_wow64);
++  ReadBool("connectionSaveData", storage->override_connection_save_data);
++
++  // Read numeric fields.
++  v8::Local<v8::Value> val;
++  if (data->Get(context, V8AtomicString(isolate, "hardwareConcurrency"))
++           .ToLocal(&val) && val->IsNumber()) {
++    storage->override_hardware_concurrency =
++        static_cast<unsigned>(val.As<v8::Number>()->Value());
++  }
++  if (data->Get(context, V8AtomicString(isolate, "deviceMemory"))
++           .ToLocal(&val) && val->IsNumber()) {
++    storage->override_device_memory =
++        static_cast<float>(val.As<v8::Number>()->Value());
++  }
++  if (data->Get(context, V8AtomicString(isolate, "connectionRtt"))
++           .ToLocal(&val) && val->IsNumber()) {
++    storage->override_connection_rtt =
++        static_cast<unsigned>(val.As<v8::Number>()->Value());
++  }
++  if (data->Get(context, V8AtomicString(isolate, "connectionDownlink"))
++           .ToLocal(&val) && val->IsNumber()) {
++    storage->override_connection_downlink = val.As<v8::Number>()->Value();
++  }
++  if (data->Get(context, V8AtomicString(isolate, "storageQuota"))
++           .ToLocal(&val) && val->IsNumber()) {
++    storage->override_storage_quota =
++        static_cast<uint64_t>(val.As<v8::Number>()->Value());
++  }
++
++  // Read languages array: string[]
++  if (data->Get(context, V8AtomicString(isolate, "languages"))
++           .ToLocal(&val) && val->IsArray()) {
++    v8::Local<v8::Array> arr = val.As<v8::Array>();
++    Vector<String> langs;
++    for (uint32_t i = 0; i < arr->Length(); i++) {
++      v8::Local<v8::Value> elem;
++      if (arr->Get(context, i).ToLocal(&elem) && elem->IsString()) {
++        langs.push_back(ToCoreString(isolate, elem.As<v8::String>()));
++      }
++    }
++    storage->override_languages = std::move(langs);
++  }
++
++  LOG(WARNING) << "[__rUA] All fields populated, userAgent="
++               << (storage->override_user_agent.has_value()
++                       ? storage->override_user_agent.value().Utf8()
++                       : "NONE");
+ 
+   // Self-destruct: delete __rUA from global.
++  v8::Local<v8::Object> global = context->Global();
+   std::ignore = global->Delete(context, V8AtomicString(isolate, "__rUA"));
+ }
+ 
+@@ -1643,24 +1768,37 @@ void InstallOverrideRegistrationBridge(v8::Isolate* isolate,
+ 
+ }  // namespace
+ 
+-void InstallV8BuiltinOverrides(ScriptState* script_state) {
+-  if (!script_state || !script_state->ContextIsValid())
++void InstallOverrideBridge(ScriptState* script_state) {
++  if (!script_state || !script_state->ContextIsValid()) {
+     return;
++  }
+ 
+   v8::Isolate* isolate = script_state->GetIsolate();
+   v8::Local<v8::Context> context = script_state->GetContext();
+ 
+-  // V8 debug builds require a MicrotasksScope for API calls like Set().
+-  // This function is called during context initialization from
+-  // LocalWindowProxy::Initialize(), which may not have one active.
+   v8::MicrotasksScope microtasks_scope(
+       isolate, context->GetMicrotaskQueue(),
+       v8::MicrotasksScope::kDoNotRunMicrotasks);
+ 
+-  // Install the override registration bridge (__ro, __rov, __rUA) first.
+-  // Preload scripts call these to register overrides into V8 Private storage.
+-  // They are deleted by the last preload script after all overrides are set.
++  // Install __ro, __rov, __rUA bridge functions before DidCreateScriptContext
++  // so preload scripts can register overrides via contextBridge.executeInMainWorld.
+   InstallOverrideRegistrationBridge(isolate, context);
++}
++
++void InstallV8BuiltinOverrides(ScriptState* script_state) {
++  if (!script_state || !script_state->ContextIsValid()) {
++    return;
++  }
++
++  fprintf(stderr, "[V8Overrides] starting\n");
++  fflush(stderr);
++
++  v8::Isolate* isolate = script_state->GetIsolate();
++  v8::Local<v8::Context> context = script_state->GetContext();
++
++  v8::MicrotasksScope microtasks_scope(
++      isolate, context->GetMicrotaskQueue(),
++      v8::MicrotasksScope::kDoNotRunMicrotasks);
+ 
+   InstallMathOverrides(isolate, context);
+   InstallDateOverrides(isolate, context);
+@@ -1673,6 +1811,9 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+   InstallPostMessageOverrides(isolate, context);
+   InstallBatch20Overrides(isolate, context);
+   InstallPropertyExistenceOverrides(isolate, context);
++
++  fprintf(stderr, "[V8Overrides] done\n");
++  fflush(stderr);
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h
+index f07dc1435c7792d620c7c6f3a8991d6e7c3a7497..6bd9c59a9c77ad201c84221a46466933f53db0f2 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h
+@@ -9,10 +9,14 @@ namespace blink {
+ 
+ class ScriptState;
+ 
++// Installs the __ro/__rov/__rUA bridge functions on the global object.
++// Must be called BEFORE DidCreateScriptContext() so the preload can use them.
++// Main world only.
++void InstallOverrideBridge(ScriptState* script_state);
++
+ // Installs V8-level wrappers for built-in functions (Math, Date, Error, etc.)
+ // that check the V8 Private override container at call time.
+-// Also installs the __ro/__rov/__rUA bridge functions for preload registration.
+-// Must be called after InstallConditionalFeatures(), main world only.
++// Must be called after DidCreateScriptContext(), main world only.
+ void InstallV8BuiltinOverrides(ScriptState* script_state);
+ 
+ }  // namespace blink
