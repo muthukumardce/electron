@@ -1281,6 +1281,78 @@ will be temporary.
 
 Returns `string` - The user agent for this session.
 
+#### `ses.setFingerprintOverrides(overrides)`
+
+* `overrides` Object | null - Pass `null` to clear all overrides.
+  * `ua` Object (optional) - User-Agent and Client Hints overrides.
+    * `string` string - The full User-Agent string.
+    * `brands` Object[] - Sec-CH-UA brand list.
+      * `brand` string
+      * `version` string
+    * `fullVersionList` Object[] - Sec-CH-UA-Full-Version-List brand list.
+      * `brand` string
+      * `version` string
+    * `platform` string - e.g. `"Windows"`, `"macOS"`.
+    * `platformVersion` string - e.g. `"10.0.0"`.
+    * `architecture` string - e.g. `"x86"`.
+    * `bitness` string - e.g. `"64"`.
+    * `model` string - Device model (empty string for desktop).
+    * `mobile` boolean - Whether to report as a mobile device.
+    * `formFactor` string - e.g. `"Desktop"`.
+    * `navigatorPlatform` string - Value for `navigator.platform`, e.g. `"Win32"`.
+  * `hardware` Object (optional) - Hardware capability overrides.
+    * `cores` number - `navigator.hardwareConcurrency` value.
+    * `ram` number - `navigator.deviceMemory` value in GB.
+    * `gpu` string - GPU renderer string.
+    * `gpuVendor` string - GPU vendor string.
+  * `screen` [FingerprintScreen](structures/fingerprint-screen.md) (optional) - Screen dimension overrides.
+  * `network` Object (optional) - Network Information API overrides.
+    * `type` string - Connection type, e.g. `"wifi"`.
+    * `effectiveType` string - Effective type, e.g. `"4g"`.
+    * `rtt` number - Round-trip time in ms.
+    * `downlink` number - Downlink speed in Mbps.
+    * `saveData` boolean - Data saver mode.
+  * `language` Object (optional) - Language overrides.
+    * `primary` string - Primary language, e.g. `"en-US"`.
+    * `list` string[] - `navigator.languages` value.
+    * `acceptHeader` string - Accept-Language header value.
+  * `timezone` string (optional) - IANA timezone, e.g. `"America/New_York"`.
+  * `geo` Object (optional) - Geolocation API overrides.
+    * `latitude` number
+    * `longitude` number
+    * `accuracy` number - Accuracy in meters.
+  * `seeds` Object (optional) - Deterministic noise seeds for fingerprint APIs.
+    * `canvas` number (optional)
+    * `audio` number (optional)
+    * `webgl` number (optional)
+    * `font` number (optional)
+    * `hardware` number (optional)
+    * `performance` number (optional)
+    * `svg` number (optional)
+    * `crypto` number (optional)
+    * `dom` number (optional)
+    * `math` number (optional)
+    * `speech` number (optional)
+    * `master` number (optional)
+    * `network` number (optional)
+    * `wasm` number (optional)
+    * `cache` number (optional)
+    * `worker` number (optional)
+  * `fonts` Object (optional) - Font enumeration overrides.
+    * `allowList` string[] - List of font families to expose.
+  * `storageQuota` number (optional) - `navigator.storage.estimate()` quota in bytes.
+  * `battery` Object (optional) - Battery Status API overrides.
+    * `charging` boolean
+    * `level` number - Battery level between 0 and 1.
+    * `chargingTime` number - Seconds until fully charged.
+    * `dischargingTime` number - Seconds until empty.
+  * `disabled` string[] (optional) - List of override categories to skip.
+
+Configures fingerprint overrides for this session at the C++ network stack
+level. All HTTP headers (User-Agent, Client Hints, Accept-Language) and
+JavaScript API return values (navigator, screen, canvas, etc.) are overridden
+without preload scripts. Pass `null` to clear all overrides.
+
 #### `ses.setSSLConfig(config)`
 
 * `config` Object
