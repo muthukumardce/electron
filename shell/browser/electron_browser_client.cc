@@ -4,6 +4,8 @@
 
 #include "shell/browser/electron_browser_client.h"
 
+#include "shell/browser/api/fingerprint_override_manager.h"
+
 #if BUILDFLAG(IS_WIN)
 #include <shlobj.h>
 #endif
@@ -1061,6 +1063,12 @@ void ElectronBrowserClient::SetUserAgent(const std::string& user_agent) {
 }
 
 blink::UserAgentMetadata ElectronBrowserClient::GetUserAgentMetadata() {
+  // Check if a session has set fingerprint overrides with UA metadata.
+  const auto* override_metadata =
+      FingerprintOverrideManager::GetInstance().GetOverrideMetadata();
+  if (override_metadata)
+    return *override_metadata;
+
   blink::UserAgentMetadata metadata = embedder_support::GetUserAgentMetadata();
 
   // Add "Google Chrome" brand to sec-ch-ua headers to match real Chrome.
@@ -1080,6 +1088,16 @@ blink::UserAgentMetadata ElectronBrowserClient::GetUserAgentMetadata() {
   }
 
   return metadata;
+}
+
+std::optional<base::flat_map<std::string, std::string>>
+ElectronBrowserClient::GetFingerprintConfig(
+    content::BrowserContext* browser_context) {
+  const auto* config =
+      FingerprintOverrideManager::GetInstance().GetConfig(browser_context);
+  if (!config)
+    return std::nullopt;
+  return config->SerializeToFlatMap();
 }
 
 mojo::PendingRemote<network::mojom::URLLoaderFactory>

@@ -4,6 +4,8 @@
 
 #include "shell/browser/api/electron_api_session.h"
 
+#include "shell/browser/api/fingerprint_override_manager.h"
+
 #include <algorithm>
 #include <memory>
 #include <set>
@@ -1015,6 +1017,250 @@ std::string Session::GetUserAgent() {
   return browser_context_->GetUserAgent();
 }
 
+void Session::SetFingerprintOverrides(v8::Local<v8::Value> val,
+                                      gin::Arguments* args) {
+  // null clears all overrides
+  if (val->IsNullOrUndefined()) {
+    FingerprintOverrideManager::GetInstance().RemoveConfig(
+        browser_context());
+    return;
+  }
+
+  gin_helper::Dictionary options;
+  if (!gin::ConvertFromV8(args->isolate(), val, &options)) {
+    args->ThrowTypeError("Must pass an object or null");
+    return;
+  }
+
+  auto config = std::make_unique<FingerprintConfig>();
+
+  // --- Parse UA section ---
+  gin_helper::Dictionary ua_dict;
+  if (options.Get("ua", &ua_dict)) {
+    FingerprintConfig::UA ua;
+    ua_dict.Get("string", &ua.string);
+    ua_dict.Get("platform", &ua.platform);
+    ua_dict.Get("platformVersion", &ua.platform_version);
+    ua_dict.Get("architecture", &ua.architecture);
+    ua_dict.Get("bitness", &ua.bitness);
+    ua_dict.Get("model", &ua.model);
+    ua_dict.Get("mobile", &ua.mobile);
+    ua_dict.Get("formFactor", &ua.form_factor);
+    ua_dict.Get("navigatorPlatform", &ua.navigator_platform);
+
+    // Parse brands array: [{brand: string, version: string}, ...]
+    v8::Local<v8::Value> brands_val;
+    if (ua_dict.Get("brands", &brands_val) && brands_val->IsArray()) {
+      auto brands_arr = brands_val.As<v8::Array>();
+      for (uint32_t i = 0; i < brands_arr->Length(); i++) {
+        gin_helper::Dictionary brand_dict;
+        v8::Local<v8::Value> item;
+        if (brands_arr->Get(args->isolate()->GetCurrentContext(), i)
+                .ToLocal(&item) &&
+            gin::ConvertFromV8(args->isolate(), item, &brand_dict)) {
+          std::string brand, version;
+          brand_dict.Get("brand", &brand);
+          brand_dict.Get("version", &version);
+          ua.brands.push_back({brand, version});
+        }
+      }
+    }
+
+    // Parse fullVersionList array
+    v8::Local<v8::Value> fvl_val;
+    if (ua_dict.Get("fullVersionList", &fvl_val) && fvl_val->IsArray()) {
+      auto fvl_arr = fvl_val.As<v8::Array>();
+      for (uint32_t i = 0; i < fvl_arr->Length(); i++) {
+        gin_helper::Dictionary brand_dict;
+        v8::Local<v8::Value> item;
+        if (fvl_arr->Get(args->isolate()->GetCurrentContext(), i)
+                .ToLocal(&item) &&
+            gin::ConvertFromV8(args->isolate(), item, &brand_dict)) {
+          std::string brand, version;
+          brand_dict.Get("brand", &brand);
+          brand_dict.Get("version", &version);
+          ua.full_version_list.push_back({brand, version});
+        }
+      }
+    }
+
+    config->ua = std::move(ua);
+  }
+
+  // --- Parse hardware section ---
+  gin_helper::Dictionary hw_dict;
+  if (options.Get("hardware", &hw_dict)) {
+    FingerprintConfig::Hardware hw;
+    hw_dict.Get("cores", &hw.cores);
+    hw_dict.Get("ram", &hw.ram);
+    hw_dict.Get("gpu", &hw.gpu);
+    hw_dict.Get("gpuVendor", &hw.gpu_vendor);
+    config->hardware = std::move(hw);
+  }
+
+  // --- Parse screen section ---
+  gin_helper::Dictionary screen_dict;
+  if (options.Get("screen", &screen_dict)) {
+    FingerprintConfig::Screen scr;
+    screen_dict.Get("width", &scr.width);
+    screen_dict.Get("height", &scr.height);
+    screen_dict.Get("availWidth", &scr.avail_width);
+    screen_dict.Get("availHeight", &scr.avail_height);
+    screen_dict.Get("colorDepth", &scr.color_depth);
+    screen_dict.Get("pixelDepth", &scr.pixel_depth);
+    screen_dict.Get("dpr", &scr.dpr);
+    screen_dict.Get("maxTouchPoints", &scr.max_touch_points);
+    config->screen = std::move(scr);
+  }
+
+  // --- Parse network section ---
+  gin_helper::Dictionary net_dict;
+  if (options.Get("network", &net_dict)) {
+    FingerprintConfig::Network net;
+    net_dict.Get("type", &net.type);
+    net_dict.Get("effectiveType", &net.effective_type);
+    net_dict.Get("rtt", &net.rtt);
+    net_dict.Get("downlink", &net.downlink);
+    net_dict.Get("saveData", &net.save_data);
+    config->network = std::move(net);
+  }
+
+  // --- Parse language section ---
+  gin_helper::Dictionary lang_dict;
+  if (options.Get("language", &lang_dict)) {
+    FingerprintConfig::Language lang;
+    lang_dict.Get("primary", &lang.primary);
+    lang_dict.Get("list", &lang.list);
+    lang_dict.Get("acceptHeader", &lang.accept_header);
+    config->language = std::move(lang);
+  }
+
+  // --- Parse timezone ---
+  options.GetOptional("timezone", &config->timezone);
+
+  // --- Parse geo section ---
+  gin_helper::Dictionary geo_dict;
+  if (options.Get("geo", &geo_dict)) {
+    FingerprintConfig::Geo geo;
+    geo_dict.Get("latitude", &geo.latitude);
+    geo_dict.Get("longitude", &geo.longitude);
+    geo_dict.Get("accuracy", &geo.accuracy);
+    config->geo = std::move(geo);
+  }
+
+  // --- Parse seeds section ---
+  gin_helper::Dictionary seeds_dict;
+  if (options.Get("seeds", &seeds_dict)) {
+    FingerprintConfig::Seeds seeds;
+    seeds_dict.GetOptional("canvas", &seeds.canvas);
+    seeds_dict.GetOptional("audio", &seeds.audio);
+    seeds_dict.GetOptional("webgl", &seeds.webgl);
+    seeds_dict.GetOptional("font", &seeds.font);
+    seeds_dict.GetOptional("hardware", &seeds.hardware);
+    seeds_dict.GetOptional("performance", &seeds.performance);
+    seeds_dict.GetOptional("svg", &seeds.svg);
+    seeds_dict.GetOptional("crypto", &seeds.crypto);
+    seeds_dict.GetOptional("dom", &seeds.dom);
+    seeds_dict.GetOptional("math", &seeds.math);
+    seeds_dict.GetOptional("speech", &seeds.speech);
+    seeds_dict.GetOptional("master", &seeds.master);
+    seeds_dict.GetOptional("network", &seeds.network);
+    seeds_dict.GetOptional("wasm", &seeds.wasm);
+    seeds_dict.GetOptional("cache", &seeds.cache);
+    seeds_dict.GetOptional("worker", &seeds.worker);
+    config->seeds = std::move(seeds);
+  }
+
+  // --- Parse fonts section ---
+  gin_helper::Dictionary fonts_dict;
+  if (options.Get("fonts", &fonts_dict)) {
+    FingerprintConfig::Fonts fonts;
+    fonts_dict.Get("allowList", &fonts.allow_list);
+    config->fonts = std::move(fonts);
+  }
+
+  // --- Parse storageQuota ---
+  options.GetOptional("storageQuota", &config->storage_quota);
+
+  // --- Parse battery section ---
+  gin_helper::Dictionary battery_dict;
+  if (options.Get("battery", &battery_dict)) {
+    FingerprintConfig::Battery battery;
+    battery_dict.Get("charging", &battery.charging);
+    battery_dict.Get("level", &battery.level);
+    battery_dict.Get("chargingTime", &battery.charging_time);
+    battery_dict.Get("dischargingTime", &battery.discharging_time);
+    config->battery = std::move(battery);
+  }
+
+  // --- Parse disabled list ---
+  std::vector<std::string> disabled_list;
+  if (options.Get("disabled", &disabled_list)) {
+    config->disabled = base::flat_set<std::string>(
+        std::move(disabled_list));
+  }
+
+  // Store the config in the manager
+  FingerprintOverrideManager::GetInstance().SetConfig(
+      browser_context(), std::move(config));
+
+  // Apply UA string + Accept-Language to the network stack immediately
+  const FingerprintConfig* applied_config =
+      FingerprintOverrideManager::GetInstance().GetConfig(browser_context());
+  if (applied_config) {
+    auto* network_context =
+        browser_context_->GetDefaultStoragePartition()->GetNetworkContext();
+
+    if (applied_config->ua.has_value()) {
+      const auto& ua_string = applied_config->ua->string;
+      if (!ua_string.empty()) {
+        browser_context_->SetUserAgent(ua_string);
+        network_context->SetUserAgent(ua_string);
+      }
+    }
+
+    if (applied_config->language.has_value()) {
+      const auto& accept_header = applied_config->language->accept_header;
+      if (!accept_header.empty()) {
+        network_context->SetAcceptLanguage(
+            net::HttpUtil::GenerateAcceptLanguageHeader(accept_header));
+      }
+    }
+  }
+}
+
+v8::Local<v8::Value> Session::GetFingerprintOverrides(v8::Isolate* isolate) {
+  const FingerprintConfig* config =
+      FingerprintOverrideManager::GetInstance().GetConfig(browser_context());
+  if (!config) {
+    return v8::Null(isolate);
+  }
+
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+
+  if (config->ua.has_value()) {
+    auto ua_dict = gin_helper::Dictionary::CreateEmpty(isolate);
+    ua_dict.Set("string", config->ua->string);
+    ua_dict.Set("platform", config->ua->platform);
+    ua_dict.Set("platformVersion", config->ua->platform_version);
+    ua_dict.Set("architecture", config->ua->architecture);
+    ua_dict.Set("bitness", config->ua->bitness);
+    ua_dict.Set("model", config->ua->model);
+    ua_dict.Set("mobile", config->ua->mobile);
+    ua_dict.Set("formFactor", config->ua->form_factor);
+    ua_dict.Set("navigatorPlatform", config->ua->navigator_platform);
+    dict.Set("ua", ua_dict);
+  }
+
+  if (config->timezone.has_value())
+    dict.Set("timezone", config->timezone.value());
+
+  if (config->storage_quota.has_value())
+    dict.Set("storageQuota", config->storage_quota.value());
+
+  return dict.GetHandle();
+}
+
 void Session::SetSSLConfig(network::mojom::SSLConfigPtr config) {
   browser_context_->SetSSLConfig(std::move(config));
 }
@@ -1795,6 +2041,10 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
       .SetMethod("isPersistent", &Session::IsPersistent)
       .SetMethod("setUserAgent", &Session::SetUserAgent)
       .SetMethod("getUserAgent", &Session::GetUserAgent)
+      .SetMethod("setFingerprintOverrides",
+                 &Session::SetFingerprintOverrides)
+      .SetMethod("getFingerprintOverrides",
+                 &Session::GetFingerprintOverrides)
       .SetMethod("setSSLConfig", &Session::SetSSLConfig)
       .SetMethod("getBlobData", &Session::GetBlobData)
       .SetMethod("downloadURL", &Session::DownloadURL)

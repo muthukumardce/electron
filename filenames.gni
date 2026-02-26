@@ -301,6 +301,8 @@ filenames = {
     "shell/browser/api/electron_api_service_worker_main.h",
     "shell/browser/api/electron_api_session.cc",
     "shell/browser/api/electron_api_session.h",
+    "shell/browser/api/fingerprint_override_manager.cc",
+    "shell/browser/api/fingerprint_override_manager.h",
     "shell/browser/api/electron_api_system_preferences.cc",
     "shell/browser/api/electron_api_system_preferences.h",
     "shell/browser/api/electron_api_tray.cc",
