@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Thu, 26 Feb 2026 20:47:34 +0530
+Subject: Fix font loading promises when fingerprint font overrides are active
+
+When font overrides are enabled via setFingerprintOverrides(), the
+FontFace::loadForBinding() early-return path skipped the real font load
+but left the FontFace status as kNotLoaded. This caused
+FontStatusPromise() to return a forever-pending promise, breaking any
+code awaiting document.fonts.load() or FontFace.load().
+
+- font_face.cc: Call SetLoadStatus(kLoaded) before returning
+  FontStatusPromise so the promise resolves immediately.
+
+- font_face_set.cc: Pass an empty FontFaceArray instead of nullptr to
+  LoadFontPromiseResolver to avoid a null dereference when the resolver
+  iterates the face list during LoadFonts().
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/third_party/blink/renderer/core/css/font_face.cc b/third_party/blink/renderer/core/css/font_face.cc
+index a997192dc961a0e5560b5625bff10d9d87b451d4..d4f304a741f355fe70afa7a376617c5252a01a37 100644
+--- a/third_party/blink/renderer/core/css/font_face.cc
++++ b/third_party/blink/renderer/core/css/font_face.cc
+@@ -601,6 +601,9 @@ ScriptPromise<FontFace> FontFace::loadForBinding(ScriptState* script_state) {
+   if (storage && !storage->IsOverrideDisabled("fonts")) {
+     // When font overrides are active, skip the real font load to avoid
+     // triggering sandbox DCHECK failures in renderer processes.
++    // Set status to kLoaded so FontStatusPromise resolves immediately
++    // instead of returning a forever-pending promise.
++    SetLoadStatus(kLoaded);
+     return FontStatusPromise(script_state);
+   }
+   return load(script_state);
+diff --git a/third_party/blink/renderer/core/css/font_face_set.cc b/third_party/blink/renderer/core/css/font_face_set.cc
+index 7de54d8dd287fb758ef397930154da38a9aee0a2..777113456b5cd23d36456a4a3277971cf870122e 100644
+--- a/third_party/blink/renderer/core/css/font_face_set.cc
++++ b/third_party/blink/renderer/core/css/font_face_set.cc
+@@ -252,8 +252,9 @@ ScriptPromise<IDLSequence<FontFace>> FontFaceSet::loadForBinding(
+         if (!InActiveContext()) {
+           return ScriptPromise<IDLSequence<FontFace>>();
+         }
++        FontFaceArray empty_faces;
+         auto* resolver = MakeGarbageCollected<
+-            LoadFontPromiseResolver>(nullptr, script_state);
++            LoadFontPromiseResolver>(&empty_faces, script_state);
+         auto promise = resolver->Promise();
+         resolver->LoadFonts();
+         return promise;
