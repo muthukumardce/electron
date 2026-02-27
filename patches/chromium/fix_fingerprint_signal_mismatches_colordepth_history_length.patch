@@ -1,0 +1,127 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Fri, 27 Feb 2026 21:01:47 +0530
+Subject: Fix fingerprint signal mismatches: colorDepth, history.length,
+ SeededNoise
+
+Three changes to reduce detectable differences between Electron and Chrome:
+
+1. screen.colorDepth: Return 32 (RGBA) on Windows instead of 24 (RGB).
+   Chrome's ScreenInfo.depth reports 32 on Windows; Electron's display
+   info only reports 24. Add BUILDFLAG(IS_WIN) guard in Screen::colorDepth()
+   to clamp to 32, matching Chrome's native behavior.
+
+2. history.length: Add lengthForBinding() override via IDL ImplementedAs.
+   FalconBrowser's tab initialization accumulates history entries (up to
+   kMaxSessionHistoryEntries=50) before the user page loads, causing
+   history.length to report 50 instead of Chrome's 1 for a fresh page.
+   The ForBinding hook returns 1 when session overrides are active,
+   matching Chrome's behavior (fpjs reports length-1=0).
+
+3. SeededNoise: Return 0.5 when seed is 0 so that (SeededNoise-0.5)*factor
+   produces exactly zero noise when no seed is configured. Prevents
+   unintended noise artifacts when a fingerprint category is disabled.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/third_party/blink/renderer/core/frame/history.cc b/third_party/blink/renderer/core/frame/history.cc
+index 835ec7e99c6cc5f5c8797a389f855ce455a777cd..871c646956db326efb343abfbf7e6b58c60a2101 100644
+--- a/third_party/blink/renderer/core/frame/history.cc
++++ b/third_party/blink/renderer/core/frame/history.cc
+@@ -55,6 +55,7 @@
+ #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+ #include "third_party/blink/renderer/platform/wtf/text/strcat.h"
+ #include "third_party/blink/renderer/platform/wtf/text/string_view.h"
++#include "third_party/blink/renderer/core/frame/session_override_helpers.h"
+ 
+ namespace blink {
+ 
+@@ -107,6 +108,17 @@ unsigned History::length(ExceptionState& exception_state) const {
+   return DomWindow()->GetFrame()->Client()->BackForwardLength();
+ }
+ 
++unsigned History::lengthForBinding(ScriptState* script_state,
++                                   ExceptionState& exception_state) const {
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (storage && storage->override_master_seed.has_value() &&
++      !storage->IsOverrideDisabled("history.length")) {
++    // Chrome fresh page: history.length = 1. Return 1 to match.
++    return 1;
++  }
++  return length(exception_state);
++}
++
+ ScriptValue History::state(ScriptState* script_state,
+                            ExceptionState& exception_state) {
+   return StateHelper(script_state, exception_state);
+diff --git a/third_party/blink/renderer/core/frame/history.h b/third_party/blink/renderer/core/frame/history.h
+index 91f8f7fb855f74dc2b4c5eb61a436fce2c4f06fc..2198aac8773d1e6585ef184a3816e5e9657b9e03 100644
+--- a/third_party/blink/renderer/core/frame/history.h
++++ b/third_party/blink/renderer/core/frame/history.h
+@@ -56,6 +56,7 @@ class CORE_EXPORT History final : public ScriptWrappable,
+   explicit History(LocalDOMWindow*);
+ 
+   unsigned length(ExceptionState&) const;
++  unsigned lengthForBinding(ScriptState*, ExceptionState&) const;
+   ScriptValue state(ScriptState*, ExceptionState&);
+ 
+   void back(ScriptState*, ExceptionState&);
+diff --git a/third_party/blink/renderer/core/frame/history.idl b/third_party/blink/renderer/core/frame/history.idl
+index e7deeeac3195e8084c08247f982b19f9a289cfbb..68b46d21f6d8944a9c60ee95baea0c89bac00eae 100644
+--- a/third_party/blink/renderer/core/frame/history.idl
++++ b/third_party/blink/renderer/core/frame/history.idl
+@@ -30,7 +30,7 @@ enum ScrollRestoration {"auto", "manual"};
+ [
+     Exposed=Window
+ ] interface History {
+-    [MeasureAs=HistoryLength, RaisesException] readonly attribute unsigned long length;
++    [MeasureAs=HistoryLength, CallWith=ScriptState, RaisesException, ImplementedAs=lengthForBinding] readonly attribute unsigned long length;
+     [Measure, RaisesException] attribute ScrollRestoration scrollRestoration;
+     [CallWith=ScriptState, RaisesException] readonly attribute any state;
+     [CallWith=ScriptState, RaisesException] void go(optional long delta = 0);
+diff --git a/third_party/blink/renderer/core/frame/screen.cc b/third_party/blink/renderer/core/frame/screen.cc
+index 3e41bfd85193dc3495679a18a483812e962748b2..dc16579542d1ec34c6b1922e7b66df14879089c9 100644
+--- a/third_party/blink/renderer/core/frame/screen.cc
++++ b/third_party/blink/renderer/core/frame/screen.cc
+@@ -29,6 +29,7 @@
+ #include "third_party/blink/renderer/core/frame/screen.h"
+ 
+ #include "base/numerics/safe_conversions.h"
++#include "build/build_config.h"
+ #include "services/network/public/mojom/permissions_policy/permissions_policy_feature.mojom-blink.h"
+ #include "third_party/blink/renderer/core/event_target_names.h"
+ #include "third_party/blink/renderer/core/frame/local_dom_window.h"
+@@ -117,9 +118,14 @@ unsigned Screen::colorDepth() const {
+   if (!DomWindow()) {
+     return unknown_color_depth;
+   }
+-  return GetScreenInfo().depth == 0
+-             ? unknown_color_depth
+-             : base::saturated_cast<unsigned>(GetScreenInfo().depth);
++  unsigned depth = base::saturated_cast<unsigned>(GetScreenInfo().depth);
++#if BUILDFLAG(IS_WIN)
++  // Chrome on Windows reports 32 (RGBA). Electron's display info may
++  // report 24 (RGB only). Match Chrome's behavior.
++  return depth < 32 ? 32u : depth;
++#else
++  return depth == 0 ? unknown_color_depth : depth;
++#endif
+ }
+ 
+ unsigned Screen::pixelDepth() const {
+diff --git a/third_party/blink/renderer/core/frame/session_override_helpers.h b/third_party/blink/renderer/core/frame/session_override_helpers.h
+index 9dd7d60c2987aba34caf28ef5e972b0ad10cd4ed..1f65a54c432b124da2ecfdbe01532bdce5bb2c3f 100644
+--- a/third_party/blink/renderer/core/frame/session_override_helpers.h
++++ b/third_party/blink/renderer/core/frame/session_override_helpers.h
+@@ -47,7 +47,11 @@ inline UAOverrideValues_Storage* GetSessionOverrideStorage(
+ 
+ // Deterministic seeded noise function. Returns a value in [0.0, 1.0).
+ // Uses the same algorithm as the JS seed-utils.ts for consistency.
++// Returns 0.5 when seed is 0 so that callers using (SeededNoise - 0.5) * factor
++// produce exactly zero noise when no seed is configured.
+ inline double SeededNoise(double seed, int index) {
++  if (seed == 0.0)
++    return 0.5;
+   double combined = seed + static_cast<double>(index);
+   double x = std::sin(combined) * 10000.0;
+   return x - std::floor(x);

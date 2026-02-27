@@ -220,6 +220,11 @@ void RendererClientBase::RenderThreadStarted() {
   blink::WebRuntimeFeatures::EnableFeatureFromString("MessagePortCloseEvent",
                                                      true);
 
+#if BUILDFLAG(IS_WIN) || BUILDFLAG(IS_MAC)
+  // Enable Web Share API to match Chrome (enabled on Win/Mac/ChromeOS/Android).
+  blink::WebRuntimeFeatures::EnableFeatureFromString("WebShare", true);
+#endif
+
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   extensions_client_ = std::make_unique<ElectronExtensionsClient>();
   extensions::ExtensionsClient::Set(extensions_client_.get());
