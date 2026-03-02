@@ -1,0 +1,396 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Mon, 2 Mar 2026 20:19:09 +0530
+Subject: Fix fingerprint signal mismatches: canvas noise, RTT, voices,
+ Widevine, history, window property order
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Address multiple fingerprint.com (fpjs) signal discrepancies between
+Electron and Chrome to reduce bot/automation detection scores.
+
+Canvas (canvasFingerprint):
+- Disable Chromium's canvas noise protection in MaybeNoiseSnapshot() by
+  returning false early. The noise injection alters pixel data causing
+  canvas hashes to diverge from Chrome on the same GPU/machine.
+
+History (history.length):
+- Return 1 from both length() and lengthForBinding() to match Chrome's
+  per-tab navigation count. Electron's BackForwardLength() accumulates
+  entries across sessions (e.g. 150-200), which is abnormal.
+
+Network RTT/downlink (s104 - navigator.connection.rtt):
+- Return 50ms RTT and 10 Mbps downlink when not observing, instead of
+  NQE 4G defaults (175ms→200ms RTT). Desktop Chrome on WiFi/Ethernet
+  accumulates real measurements quickly; the 200ms 4G default is
+  unusual for desktop browsers.
+- Disable per-process RTT randomization (GetRandomMultiplier returns
+  1.0) so values are consistent across browser instances.
+
+Speech synthesis voices (s160):
+- Inject 19 Google Network TTS voices that Chrome bundles via its
+  component extension but Electron does not include. Voices use UTF-8
+  encoded names matching Chrome's manifest, including NBSP (U+00A0)
+  after "Google" for zh-CN and zh-HK voices to match Chrome's exact
+  codepoint signature [32,17,160,2].
+
+Widevine DRM (s154 - navigator.requestMediaKeySystemAccess):
+- Enable Widevine by default in widevine.gni (enable_widevine = true).
+- Add //electron/* visibility to components/cdm/renderer/BUILD.gn so
+  Electron's renderer can link against WidevineKeySystemInfo for direct
+  renderer-side key system registration.
+
+Window property enumeration order (s156 - windowGlobalKeys):
+- After the "chrome" property is installed on the window global by the
+  extensions bindings system, delete and re-add "WebAssembly" so it
+  appears immediately after "chrome" in Object.getOwnPropertyNames().
+  This matches Chrome's property order ["Iterator","chrome","WebAssembly"]
+  instead of Electron's default ["Iterator","chrome","cookieStore"].
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/components/cdm/renderer/BUILD.gn b/components/cdm/renderer/BUILD.gn
+index fbe2ec2264cd170fe9c5ec9bcedf9fdd4732a2a0..8a53b7c861409014dbe1a36dffbb045bbe7d6f68 100644
+--- a/components/cdm/renderer/BUILD.gn
++++ b/components/cdm/renderer/BUILD.gn
+@@ -13,6 +13,7 @@ static_library("renderer") {
+     "//chromecast/*",
+     "//components/cdm/*",
+     "//content/shell/*",
++    "//electron/*",
+     "//fuchsia_web/*",
+   ]
+ 
+diff --git a/extensions/renderer/native_extension_bindings_system.cc b/extensions/renderer/native_extension_bindings_system.cc
+index 4382a50d9e79d9cc403baf6c44c32af8af20c673..3ee3a0c13e3f44754e51be3407d357bf72dd925a 100644
+--- a/extensions/renderer/native_extension_bindings_system.cc
++++ b/extensions/renderer/native_extension_bindings_system.cc
+@@ -566,6 +566,20 @@ void NativeExtensionBindingsSystem::UpdateBindingsForContext(
+     return;
+   }
+ 
++  // Move WebAssembly right after chrome in property enumeration order to match
++  // Chrome's Object.getOwnPropertyNames(window) ordering.
++  {
++    v8::Local<v8::Object> global = v8_context->Global();
++    v8::Local<v8::String> wa_key = gin::StringToSymbol(isolate, "WebAssembly");
++    v8::Local<v8::Value> wa_value;
++    if (global->Get(v8_context, wa_key).ToLocal(&wa_value) &&
++        !wa_value->IsUndefined()) {
++      if (global->Delete(v8_context, wa_key).FromMaybe(false)) {
++        global->CreateDataProperty(v8_context, wa_key, wa_value).Check();
++      }
++    }
++  }
++
+   bool is_webpage = false;
+   switch (context->context_type()) {
+     case mojom::ContextType::kUnspecified:
+diff --git a/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
+index 81ed8a5b42d52d952d845ea4ea4990291806c30c..6c0d90369e1f7f85530fa91a8332e2c3906c920d 100644
+--- a/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
++++ b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
+@@ -4,140 +4,20 @@
+ 
+ #include "third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.h"
+ 
+-#include <cstdint>
+-
+-#include "base/containers/span.h"
+ #include "base/memory/scoped_refptr.h"
+-#include "base/metrics/histogram_functions.h"
+-#include "base/metrics/histogram_macros.h"
+-#include "base/notreached.h"
+-#include "base/strings/strcat.h"
+-#include "base/time/time.h"
+-#include "third_party/blink/renderer/core/canvas_interventions/noise_hash.h"
+-#include "third_party/blink/renderer/core/canvas_interventions/noise_helper.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+-#include "third_party/blink/renderer/core/frame/frame.h"
+-#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+-#include "third_party/blink/renderer/core/frame/web_feature.h"
+-#include "third_party/blink/renderer/core/workers/worker_global_scope.h"
+-#include "third_party/blink/renderer/platform/graphics/canvas_high_entropy_op_type.h"
+ #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
+-#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
+-#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
+-#include "third_party/blink/renderer/platform/runtime_feature_state/runtime_feature_state_override_context.h"
+-#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+-#include "third_party/blink/renderer/platform/wtf/casting.h"
+-#include "third_party/blink/renderer/platform/wtf/hash_traits.h"
+-#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
+-#include "third_party/skia/include/core/SkBitmap.h"
+-#include "third_party/skia/include/core/SkImageInfo.h"
+-#include "ui/gfx/skia_span_util.h"
+ 
+ namespace blink {
+ 
+-namespace {
+-
+-constexpr const char kCanvasOperationMetricPrefix[] =
+-    "FingerprintingProtection.CanvasNoise.OperationTriggered.";
+-
+-std::string_view GetContextTypeForMetrics(ExecutionContext* execution_context) {
+-  if (execution_context->IsWindow()) {
+-    return "Window";
+-  }
+-  if (execution_context->IsDedicatedWorkerGlobalScope()) {
+-    return "DedicatedWorker";
+-  }
+-  if (execution_context->IsSharedWorkerGlobalScope()) {
+-    return "SharedWorker";
+-  }
+-  if (execution_context->IsServiceWorkerGlobalScope()) {
+-    return "ServiceWorker";
+-  }
+-  return "Other";
+-}
+-
+-// Returns true when all criteria to apply noising are met.
+-bool ShouldApplyNoise(HighEntropyCanvasOpType canvas_operations,
+-                      ExecutionContext* execution_context) {
+-  if (canvas_operations == HighEntropyCanvasOpType::kNone) {
+-    return false;
+-  }
+-  if (!execution_context) {
+-    return false;
+-  }
+-  if (!execution_context->CanvasNoiseToken().has_value()) {
+-    return false;
+-  }
+-
+-  UseCounter::Count(execution_context,
+-                    WebFeature::kCanvasReadbackNoiseMatchesHeuristics);
+-
+-  return true;
+-}
+-}  // namespace
+-
+ // static
+ bool CanvasInterventionsHelper::MaybeNoiseSnapshot(
+     ExecutionContext* execution_context,
+     scoped_refptr<StaticBitmapImage>& snapshot) {
+-  base::TimeTicks start_time = base::TimeTicks::Now();
+-  CHECK(snapshot);
+-
+-  HighEntropyCanvasOpType high_entropy_canvas_op_types =
+-      snapshot->HighEntropyCanvasOpTypes();
+-  if (!ShouldApplyNoise(high_entropy_canvas_op_types, execution_context)) {
+-    return false;
+-  }
+-
+-  // Use kUnpremul_SkAlphaType as alpha type as we are changing the pixel values
+-  // of all channels, including the alpha channel.
+-  auto info = SkImageInfo::Make(
+-      snapshot->GetSize().width(), snapshot->GetSize().height(),
+-      viz::ToClosestSkColorType(snapshot->GetSharedImageFormat()),
+-      kUnpremul_SkAlphaType, snapshot->GetColorSpace().ToSkColorSpace());
+-  SkBitmap bm;
+-  if (!bm.tryAllocPixels(info)) {
+-    return false;
+-  }
+-
+-  // Copy the original pixels from snapshot to the modifiable SkPixmap. SkBitmap
+-  // should already allocate the correct amount of pixels, so this shouldn't
+-  // fail because of memory allocation.
+-  auto pixmap_to_noise = bm.pixmap();
+-  PaintImage paint_image = snapshot->PaintImageForCurrentFrame();
+-  if (!paint_image.readPixels(bm.info(), pixmap_to_noise.writable_addr(),
+-                               bm.rowBytes(), 0, 0)) {
+-    return false;
+-  }
+-
+-  base::span<uint8_t> modify_pixels =
+-      gfx::SkPixmapToWritableSpan(pixmap_to_noise);
+-
+-  // Guaranteed to have a value, as per |ShouldApplyNoise|.
+-  auto token_hash = NoiseHash(execution_context->CanvasNoiseToken().value());
+-  NoisePixels(token_hash, modify_pixels, pixmap_to_noise.width(),
+-              pixmap_to_noise.height());
+-
+-  auto noised_image = bm.asImage();
+-  snapshot = blink::UnacceleratedStaticBitmapImage::Create(
+-      std::move(noised_image), snapshot->Orientation());
+-
+-  constexpr int canvas_op_exclusive_max =
+-      static_cast<int>(HighEntropyCanvasOpType::kMaxValue) << 1;
+-  base::UmaHistogramExactLinear(
+-      base::StrCat({kCanvasOperationMetricPrefix,
+-                    GetContextTypeForMetrics(execution_context)}),
+-      static_cast<int>(high_entropy_canvas_op_types), canvas_op_exclusive_max);
+-
+-  base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
+-  base::UmaHistogramCustomMicrosecondsTimes(
+-      "FingerprintingProtection.CanvasNoise.NoiseDuration", elapsed_time,
+-      base::Microseconds(50), base::Milliseconds(100), 100);
+-  base::UmaHistogramCounts1M("FingerprintingProtection.CanvasNoise.NoisedCanvasSize",
+-                             pixmap_to_noise.width() * pixmap_to_noise.height());
+-  UseCounter::Count(execution_context, WebFeature::kCanvasReadbackNoise);
+-
+-  return true;
++  // Canvas noise protection disabled — it alters pixel data causing
++  // canvasFingerprint to return empty array and canvas hashes to diverge
++  // from Chrome even on the same GPU/machine.
++  return false;
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/frame/history.cc b/third_party/blink/renderer/core/frame/history.cc
+index 871c646956db326efb343abfbf7e6b58c60a2101..7df8a7bc45738f76237fdac39ff7df9b310f9b61 100644
+--- a/third_party/blink/renderer/core/frame/history.cc
++++ b/third_party/blink/renderer/core/frame/history.cc
+@@ -105,18 +105,21 @@ unsigned History::length(ExceptionState& exception_state) const {
+     return 0;
+   }
+ 
+-  return DomWindow()->GetFrame()->Client()->BackForwardLength();
++  // Electron's BackForwardLength() accumulates across sessions (e.g. 200),
++  // while Chrome returns per-tab navigation count (1 for fresh page).
++  // Always return 1 to match Chrome behavior.
++  return 1;
+ }
+ 
+ unsigned History::lengthForBinding(ScriptState* script_state,
+                                    ExceptionState& exception_state) const {
+-  auto* storage = GetSessionOverrideStorage(script_state);
+-  if (storage && storage->override_master_seed.has_value() &&
+-      !storage->IsOverrideDisabled("history.length")) {
+-    // Chrome fresh page: history.length = 1. Return 1 to match.
+-    return 1;
+-  }
+-  return length(exception_state);
++  // Electron's native history.length returns accumulated session entries
++  // (e.g. 150) rather than per-tab navigation count. Chrome fresh page
++  // returns 1. Always return 1 to match Chrome behavior regardless of
++  // spoofing state.
++  (void)script_state;
++  (void)exception_state;
++  return 1;
+ }
+ 
+ ScriptValue History::state(ScriptState* script_state,
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 6c4540a959b71b41409a9bcfb838ac17d1453b10..a5230b9ecf495062e67052345915560781206c12 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -190,8 +190,9 @@ uint32_t NetworkInformation::rtt() {
+   }
+ 
+   if (!IsObserving()) {
+-    return GetNetworkStateNotifier().RoundRtt(
+-        Host(), GetNetworkStateNotifier().HttpRtt());
++    // Return a typical desktop Chrome RTT (50ms) instead of NQE 4G defaults
++    // (175ms→200ms) which are unusual for desktop browsers.
++    return 50;
+   }
+ 
+   return http_rtt_msec_;
+@@ -207,8 +208,8 @@ double NetworkInformation::downlink() {
+   }
+ 
+   if (!IsObserving()) {
+-    return GetNetworkStateNotifier().RoundMbps(
+-        Host(), GetNetworkStateNotifier().DownlinkThroughputMbps());
++    // Return a typical desktop Chrome downlink (10 Mbps) matching the RTT fix.
++    return 10.0;
+   }
+ 
+   return downlink_mbps_;
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+index 6791cd11a8f30979a6029fdadbfb53b07904d163..d5e9057fe92dc4660dd53684bbd0064d4d499ca0 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -106,6 +106,52 @@ HeapVector<Member<SpeechSynthesisVoice>> SpeechSynthesis::getVoicesForBinding(
+   if (!script_state || !script_state->ContextIsValid())
+     return result;
+ 
++  // Inject Google TTS voices that Chrome bundles but Electron does not.
++  bool has_google_voices = false;
++  for (const auto& voice : result) {
++    if (voice->name().StartsWith("Google ")) {
++      has_google_voices = true;
++      break;
++    }
++  }
++  if (!has_google_voices && !result.empty()) {
++    struct GoogleVoice {
++      const char* name;
++      const char* lang;
++    };
++    static const GoogleVoice kGoogleVoices[] = {
++        {"Google US English", "en-US"},
++        {"Google UK English Female", "en-GB"},
++        {"Google UK English Male", "en-GB"},
++        {"Google Deutsch", "de-DE"},
++        {"Google \x65\x73\x70\x61\xc3\xb1\x6f\x6c", "es-ES"},
++        {"Google \x65\x73\x70\x61\xc3\xb1\x6f\x6c de Estados Unidos", "es-US"},
++        {"Google \x66\x72\x61\x6e\xc3\xa7\x61\x69\x73", "fr-FR"},
++        {"Google \xe0\xa4\xb9\xe0\xa4\xbf\xe0\xa4\xa8\xe0\xa5\x8d\xe0\xa4\xa6\xe0\xa5\x80", "hi-IN"},
++        {"Google Bahasa Indonesia", "id-ID"},
++        {"Google italiano", "it-IT"},
++        {"Google \xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e", "ja-JP"},
++        {"Google \xed\x95\x9c\xea\xb5\xad\xec\x9d\x98", "ko-KR"},
++        {"Google Nederlands", "nl-NL"},
++        {"Google polski", "pl-PL"},
++        {"Google \x70\x6f\x72\x74\x75\x67\x75\xc3\xaa\x73 do Brasil", "pt-BR"},
++        {"Google \xd1\x80\xd1\x83\xd1\x81\xd1\x81\xd0\xba\xd0\xb8\xd0\xb9", "ru-RU"},
++        {"Google\xc2\xa0\xe6\x99\xae\xe9\x80\x9a\xe8\xaf\x9d\xef\xbc\x88\xe4\xb8\xad\xe5\x9b\xbd\xe5\xa4\xa7\xe9\x99\x86\xef\xbc\x89", "zh-CN"},
++        {"Google\xc2\xa0\xe7\xb2\xa4\xe8\xaa\x9e\xef\xbc\x88\xe9\xa6\x99\xe6\xb8\xaf\xef\xbc\x89", "zh-HK"},
++        {"Google \xe5\x9c\x8b\xe8\xaa\x9e\xef\xbc\x88\xe8\x87\xba\xe7\x81\xa3\xef\xbc\x89", "zh-TW"},
++    };
++    for (const auto& gv : kGoogleVoices) {
++      auto mojom_voice = mojom::blink::SpeechSynthesisVoice::New();
++      mojom_voice->voice_uri = String::FromUTF8(gv.name);
++      mojom_voice->name = String::FromUTF8(gv.name);
++      mojom_voice->lang = String::FromUTF8(gv.lang);
++      mojom_voice->is_local_service = true;
++      mojom_voice->is_default = false;
++      result.push_back(
++          MakeGarbageCollected<SpeechSynthesisVoice>(std::move(mojom_voice)));
++    }
++  }
++
+   // Session override: use override_speech_seed to deterministically
+   // filter/reorder the voice list. Disable path: "speech".
+   auto* storage = GetSessionOverrideStorage(script_state);
+diff --git a/third_party/blink/renderer/platform/network/network_state_notifier.cc b/third_party/blink/renderer/platform/network/network_state_notifier.cc
+index 8d3408e5a66d1fdf5de1f089bb15fe1e2fcd8edc..9c8e71c79190ea2bcb599c48a71418c7f6260442 100644
+--- a/third_party/blink/renderer/platform/network/network_state_notifier.cc
++++ b/third_party/blink/renderer/platform/network/network_state_notifier.cc
+@@ -369,18 +369,9 @@ String NetworkStateNotifier::EffectiveConnectionTypeToString(
+ }
+ 
+ double NetworkStateNotifier::GetRandomMultiplier(const String& host) const {
+-  // The random number should be a function of the hostname to reduce
+-  // cross-origin fingerprinting. The random number should also be a function
+-  // of randomized salt which is known only to the device. This prevents
+-  // origin from removing noise from the estimates.
+-  if (!host)
+-    return 1.0;
+-
+-  unsigned hash = GetHash(host) + RandomizationSalt();
+-  double random_multiplier = 0.9 + static_cast<double>((hash % 21)) * 0.01;
+-  DCHECK_LE(0.90, random_multiplier);
+-  DCHECK_GE(1.10, random_multiplier);
+-  return random_multiplier;
++  // Disable per-process randomization so that navigator.connection.rtt and
++  // downlink values are consistent across browser instances on the same machine.
++  return 1.0;
+ }
+ 
+ uint32_t NetworkStateNotifier::RoundRtt(
+diff --git a/third_party/widevine/cdm/widevine.gni b/third_party/widevine/cdm/widevine.gni
+index e31de0a5528cfb5e182e2fd4341ebea0c0aad73c..f52f23fa1c7b0a65065ff75215cb83a05b0ec451 100644
+--- a/third_party/widevine/cdm/widevine.gni
++++ b/third_party/widevine/cdm/widevine.gni
+@@ -12,8 +12,7 @@ declare_args() {
+   # Google Chrome for Testing and Android. For Fuchsia, see crbug.com/1354347.
+   # Can be optionally enabled in Chromium on non-Android platforms. Please see
+   # //src/third_party/widevine/LICENSE file for details.
+-  enable_widevine = ((is_chrome_branded || is_chrome_for_testing_branded) &&
+-                     !is_fuchsia) || is_android
++  enable_widevine = true
+ }
+ 
+ # Disable Widevine when running linux-chromeos.

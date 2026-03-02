@@ -69,6 +69,9 @@ class RendererClientBase : public content::ContentRendererClient
 
   std::unique_ptr<blink::WebPrescientNetworking> CreatePrescientNetworking(
       content::RenderFrame* render_frame) override;
+  std::unique_ptr<media::KeySystemSupportRegistration> GetSupportedKeySystems(
+      content::RenderFrame* render_frame,
+      media::GetSupportedKeySystemsCB cb) override;
 
   // Get the context that the Electron API is running in.
   v8::Local<v8::Context> GetContext(blink::WebLocalFrame* frame,

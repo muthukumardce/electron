@@ -27,7 +27,9 @@
 #if BUILDFLAG(ENABLE_WIDEVINE)
 #include "base/native_library.h"
 #include "content/public/common/cdm_info.h"
+#include "media/base/cdm_capability.h"
 #include "media/base/video_codecs.h"
+#include "third_party/widevine/cdm/widevine_cdm_common.h"
 #endif  // BUILDFLAG(ENABLE_WIDEVINE)
 
 #if BUILDFLAG(ENABLE_PDF_VIEWER)
@@ -52,9 +54,9 @@ enum class WidevineCdmFileCheck {
 #if BUILDFLAG(ENABLE_WIDEVINE)
 bool IsWidevineAvailable(
     base::FilePath* cdm_path,
-    std::vector<media::VideoCodec>* codecs_supported,
+    media::CdmCapability::VideoCodecMap* video_codecs_supported,
     base::flat_set<media::CdmSessionType>* session_types_supported,
-    base::flat_set<media::EncryptionMode>* modes_supported) {
+    base::flat_set<media::EncryptionScheme>* encryption_schemes_supported) {
   static WidevineCdmFileCheck widevine_cdm_file_check =
       WidevineCdmFileCheck::kNotChecked;
 
@@ -72,21 +74,21 @@ bool IsWidevineAvailable(
 
   if (widevine_cdm_file_check == WidevineCdmFileCheck::kFound) {
     // Add the supported codecs as if they came from the component manifest.
-    // This list must match the CDM that is being bundled with Chrome.
-    codecs_supported->push_back(media::VideoCodec::kCodecVP8);
-    codecs_supported->push_back(media::VideoCodec::kCodecVP9);
+    video_codecs_supported->emplace(media::VideoCodec::kVP8,
+                                    media::VideoCodecInfo{});
+    video_codecs_supported->emplace(media::VideoCodec::kVP9,
+                                    media::VideoCodecInfo{});
 #if BUILDFLAG(USE_PROPRIETARY_CODECS)
-    codecs_supported->push_back(media::VideoCodec::kCodecH264);
+    video_codecs_supported->emplace(media::VideoCodec::kH264,
+                                    media::VideoCodecInfo{});
 #endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
 
-    // TODO(crbug.com/767941): Push persistent-license support info here once
-    // we check in a new CDM that supports it on Linux.
     session_types_supported->insert(media::CdmSessionType::kTemporary);
 #if BUILDFLAG(IS_CHROMEOS)
     session_types_supported->insert(media::CdmSessionType::kPersistentLicense);
 #endif  // BUILDFLAG(IS_CHROMEOS)
 
-    modes_supported->insert(media::EncryptionMode::kCenc);
+    encryption_schemes_supported->insert(media::EncryptionScheme::kCenc);
 
     return true;
   }
@@ -190,29 +192,47 @@ void ElectronContentClient::AddContentDecryptionModules(
   if (cdms) {
 #if BUILDFLAG(ENABLE_WIDEVINE)
     base::FilePath cdm_path;
-    std::vector<media::VideoCodec> video_codecs_supported;
+    media::CdmCapability::VideoCodecMap video_codecs_supported;
     base::flat_set<media::CdmSessionType> session_types_supported;
-    base::flat_set<media::EncryptionMode> encryption_modes_supported;
-    if (IsWidevineAvailable(&cdm_path, &video_codecs_supported,
-                            &session_types_supported,
-                            &encryption_modes_supported)) {
-      base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
-      auto cdm_version_string =
-          command_line->GetSwitchValueASCII(switches::kWidevineCdmVersion);
-      // CdmInfo needs |path| to be the actual Widevine library,
-      // not the adapter, so adjust as necessary. It will be in the
-      // same directory as the installed adapter.
-      const base::Version version(cdm_version_string);
-      DCHECK(version.IsValid());
+    base::flat_set<media::EncryptionScheme> encryption_schemes_supported;
 
-      content::CdmCapability capability(
-          video_codecs_supported, encryption_modes_supported,
-          session_types_supported, base::flat_set<media::CdmProxy::Protocol>());
+    // Try to find the actual CDM binary on disk
+    IsWidevineAvailable(&cdm_path, &video_codecs_supported,
+                        &session_types_supported,
+                        &encryption_schemes_supported);
 
-      cdms->push_back(content::CdmInfo(
-          kWidevineCdmDisplayName, kWidevineCdmGuid, version, cdm_path,
-          kWidevineCdmFileSystemId, capability, kWidevineKeySystem, false));
+    // Always register Widevine with at least minimal capabilities so
+    // navigator.requestMediaKeySystemAccess("com.widevine.alpha") resolves.
+    // The CDM binary is only needed for actual DRM playback, not for the
+    // capability check that fingerprinting services use.
+    if (video_codecs_supported.empty()) {
+      video_codecs_supported.emplace(media::VideoCodec::kVP8,
+                                     media::VideoCodecInfo{});
+      video_codecs_supported.emplace(media::VideoCodec::kVP9,
+                                     media::VideoCodecInfo{});
+#if BUILDFLAG(USE_PROPRIETARY_CODECS)
+      video_codecs_supported.emplace(media::VideoCodec::kH264,
+                                     media::VideoCodecInfo{});
+#endif
+      session_types_supported.insert(media::CdmSessionType::kTemporary);
+      encryption_schemes_supported.insert(media::EncryptionScheme::kCenc);
     }
+
+    base::CommandLine* command_line = base::CommandLine::ForCurrentProcess();
+    auto cdm_version_string =
+        command_line->GetSwitchValueASCII(switches::kWidevineCdmVersion);
+    const base::Version version(
+        cdm_version_string.empty() ? "4.10.2934.0" : cdm_version_string);
+
+    media::CdmCapability capability(
+        {}, std::move(video_codecs_supported),
+        std::move(encryption_schemes_supported),
+        std::move(session_types_supported), version);
+
+    cdms->push_back(content::CdmInfo(
+        kWidevineKeySystem, content::CdmInfo::Robustness::kSoftwareSecure,
+        std::move(capability), false, kWidevineCdmDisplayName,
+        kWidevineCdmType, version, cdm_path));
 #endif  // BUILDFLAG(ENABLE_WIDEVINE)
   }
 }

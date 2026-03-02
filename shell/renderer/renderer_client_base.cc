@@ -46,6 +46,7 @@
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/public/web/web_plugin_params.h"
 #include "third_party/blink/public/web/web_script_source.h"
+#include "third_party/blink/public/web/web_script_controller.h"
 #include "third_party/blink/public/web/web_security_policy.h"
 #include "third_party/blink/public/web/web_view.h"
 #include "third_party/blink/renderer/platform/media/multi_buffer_data_source.h"  // nogncheck
@@ -60,8 +61,11 @@
 #include <shlobj.h>
 #endif
 
+#include "chrome/renderer/loadtimes_extension_bindings.h"       // nogncheck
+
 #if BUILDFLAG(ENABLE_WIDEVINE)
-#include "chrome/renderer/media/chrome_key_systems.h"  // nogncheck
+#include "components/cdm/renderer/widevine_key_system_info.h"  // nogncheck
+#include "media/base/eme_constants.h"                           // nogncheck
 #endif
 
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
@@ -211,6 +215,12 @@ bool RendererClientBase::ShouldLoadPreload(
 
 void RendererClientBase::RenderThreadStarted() {
   auto* command_line = base::CommandLine::ForCurrentProcess();
+
+  // Register chrome.loadTimes() and chrome.csi() deprecated APIs.
+  // These are present in regular Chrome but missing in headless Chrome.
+  // Fingerprinting services check for their absence to detect headless mode.
+  blink::WebScriptController::RegisterExtension(
+      extensions_v8::LoadTimesExtension::Get());
 
   // Enable MessagePort close event by default.
   // The feature got reverted from stable to test in
@@ -536,6 +546,46 @@ void RendererClientBase::WebViewCreated(blink::WebView* web_view,
                                         const url::Origin* outermost_origin) {
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
   new extensions::ExtensionWebViewHelper(web_view, outermost_origin);
+#endif
+}
+
+std::unique_ptr<media::KeySystemSupportRegistration>
+RendererClientBase::GetSupportedKeySystems(
+    content::RenderFrame* render_frame,
+    media::GetSupportedKeySystemsCB cb) {
+#if BUILDFLAG(ENABLE_WIDEVINE)
+  // Register Widevine directly in the renderer so that
+  // navigator.requestMediaKeySystemAccess("com.widevine.alpha", ...)
+  // resolves successfully. This bypasses browser-process Mojo IPC which
+  // may not be fully wired in Electron.
+  media::SupportedCodecs codecs =
+      media::EME_CODEC_VP8 | media::EME_CODEC_VP9_PROFILE0 |
+      media::EME_CODEC_VP9_PROFILE2 | media::EME_CODEC_AV1 |
+      media::EME_CODEC_OPUS | media::EME_CODEC_VORBIS | media::EME_CODEC_FLAC;
+#if BUILDFLAG(USE_PROPRIETARY_CODECS)
+  codecs |= media::EME_CODEC_AVC1 | media::EME_CODEC_AAC;
+#endif
+
+  base::flat_set<media::EncryptionScheme> encryption_schemes = {
+      media::EncryptionScheme::kCenc, media::EncryptionScheme::kCbcs};
+  base::flat_set<media::CdmSessionType> session_types = {
+      media::CdmSessionType::kTemporary};
+
+  media::KeySystemInfos key_systems;
+  key_systems.emplace_back(std::make_unique<cdm::WidevineKeySystemInfo>(
+      codecs, encryption_schemes, session_types,
+      media::EME_CODEC_NONE,              // hw_secure_codecs
+      base::flat_set<media::EncryptionScheme>(),  // hw_secure_encryption
+      base::flat_set<media::CdmSessionType>(),    // hw_secure_sessions
+      cdm::WidevineKeySystemInfo::Robustness::SW_SECURE_CRYPTO,
+      cdm::WidevineKeySystemInfo::Robustness::SW_SECURE_DECODE,
+      media::EmeFeatureSupport::REQUESTABLE,   // persistent_state
+      media::EmeFeatureSupport::REQUESTABLE)); // distinctive_identifier
+  std::move(cb).Run(std::move(key_systems));
+  return nullptr;
+#else
+  std::move(cb).Run({});
+  return nullptr;
 #endif
 }
 
