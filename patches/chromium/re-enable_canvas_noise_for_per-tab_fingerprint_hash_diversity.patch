@@ -1,0 +1,182 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Tue, 3 Mar 2026 21:51:22 +0530
+Subject: Re-enable canvas noise for per-tab fingerprint hash diversity
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Restore the original Chromium 144 MaybeNoiseSnapshot() implementation
+in canvas_interventions_helper.cc. This was previously disabled (returned
+false immediately) to prevent canvas hash divergence from Chrome.
+
+Re-enabling because:
+- Each FalconBrowser tab uses a separate BrowserContext via
+  session.fromPartition('persist:' + tabId), so Chromium's content layer
+  automatically assigns a unique canvas noise token per tab
+- MaybeNoiseSnapshot() applies deterministic per-origin noise using that
+  token, producing unique canvas hashes per tab — essential for
+  anti-fingerprint isolation between sessions
+- An empty canvas fingerprint array (from disabled noise) is scored more
+  suspiciously by fpjs than a non-empty hash that simply differs from
+  Chrome's baseline
+- The noise system is safe: if noise application fails (memory allocation,
+  pixel readback), the function returns false and the original unmodified
+  snapshot passes through unchanged
+
+The restored code includes the full noise pipeline:
+- ShouldApplyNoise() checks for canvas noise token and high-entropy ops
+- NoisePixels() adds 0-3 variation per RGB channel using FNV-1a hash
+- UMA histograms for operation type, noise duration, and canvas size
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
+index 6c0d90369e1f7f85530fa91a8332e2c3906c920d..81ed8a5b42d52d952d845ea4ea4990291806c30c 100644
+--- a/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
++++ b/third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.cc
+@@ -4,20 +4,140 @@
+ 
+ #include "third_party/blink/renderer/core/canvas_interventions/canvas_interventions_helper.h"
+ 
++#include <cstdint>
++
++#include "base/containers/span.h"
+ #include "base/memory/scoped_refptr.h"
++#include "base/metrics/histogram_functions.h"
++#include "base/metrics/histogram_macros.h"
++#include "base/notreached.h"
++#include "base/strings/strcat.h"
++#include "base/time/time.h"
++#include "third_party/blink/renderer/core/canvas_interventions/noise_hash.h"
++#include "third_party/blink/renderer/core/canvas_interventions/noise_helper.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
++#include "third_party/blink/renderer/core/frame/frame.h"
++#include "third_party/blink/renderer/core/frame/local_dom_window.h"
++#include "third_party/blink/renderer/core/frame/web_feature.h"
++#include "third_party/blink/renderer/core/workers/worker_global_scope.h"
++#include "third_party/blink/renderer/platform/graphics/canvas_high_entropy_op_type.h"
+ #include "third_party/blink/renderer/platform/graphics/static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/graphics/unaccelerated_static_bitmap_image.h"
++#include "third_party/blink/renderer/platform/instrumentation/use_counter.h"
++#include "third_party/blink/renderer/platform/runtime_feature_state/runtime_feature_state_override_context.h"
++#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
++#include "third_party/blink/renderer/platform/wtf/casting.h"
++#include "third_party/blink/renderer/platform/wtf/hash_traits.h"
++#include "third_party/blink/renderer/platform/wtf/text/wtf_string.h"
++#include "third_party/skia/include/core/SkBitmap.h"
++#include "third_party/skia/include/core/SkImageInfo.h"
++#include "ui/gfx/skia_span_util.h"
+ 
+ namespace blink {
+ 
++namespace {
++
++constexpr const char kCanvasOperationMetricPrefix[] =
++    "FingerprintingProtection.CanvasNoise.OperationTriggered.";
++
++std::string_view GetContextTypeForMetrics(ExecutionContext* execution_context) {
++  if (execution_context->IsWindow()) {
++    return "Window";
++  }
++  if (execution_context->IsDedicatedWorkerGlobalScope()) {
++    return "DedicatedWorker";
++  }
++  if (execution_context->IsSharedWorkerGlobalScope()) {
++    return "SharedWorker";
++  }
++  if (execution_context->IsServiceWorkerGlobalScope()) {
++    return "ServiceWorker";
++  }
++  return "Other";
++}
++
++// Returns true when all criteria to apply noising are met.
++bool ShouldApplyNoise(HighEntropyCanvasOpType canvas_operations,
++                      ExecutionContext* execution_context) {
++  if (canvas_operations == HighEntropyCanvasOpType::kNone) {
++    return false;
++  }
++  if (!execution_context) {
++    return false;
++  }
++  if (!execution_context->CanvasNoiseToken().has_value()) {
++    return false;
++  }
++
++  UseCounter::Count(execution_context,
++                    WebFeature::kCanvasReadbackNoiseMatchesHeuristics);
++
++  return true;
++}
++}  // namespace
++
+ // static
+ bool CanvasInterventionsHelper::MaybeNoiseSnapshot(
+     ExecutionContext* execution_context,
+     scoped_refptr<StaticBitmapImage>& snapshot) {
+-  // Canvas noise protection disabled — it alters pixel data causing
+-  // canvasFingerprint to return empty array and canvas hashes to diverge
+-  // from Chrome even on the same GPU/machine.
+-  return false;
++  base::TimeTicks start_time = base::TimeTicks::Now();
++  CHECK(snapshot);
++
++  HighEntropyCanvasOpType high_entropy_canvas_op_types =
++      snapshot->HighEntropyCanvasOpTypes();
++  if (!ShouldApplyNoise(high_entropy_canvas_op_types, execution_context)) {
++    return false;
++  }
++
++  // Use kUnpremul_SkAlphaType as alpha type as we are changing the pixel values
++  // of all channels, including the alpha channel.
++  auto info = SkImageInfo::Make(
++      snapshot->GetSize().width(), snapshot->GetSize().height(),
++      viz::ToClosestSkColorType(snapshot->GetSharedImageFormat()),
++      kUnpremul_SkAlphaType, snapshot->GetColorSpace().ToSkColorSpace());
++  SkBitmap bm;
++  if (!bm.tryAllocPixels(info)) {
++    return false;
++  }
++
++  // Copy the original pixels from snapshot to the modifiable SkPixmap. SkBitmap
++  // should already allocate the correct amount of pixels, so this shouldn't
++  // fail because of memory allocation.
++  auto pixmap_to_noise = bm.pixmap();
++  PaintImage paint_image = snapshot->PaintImageForCurrentFrame();
++  if (!paint_image.readPixels(bm.info(), pixmap_to_noise.writable_addr(),
++                               bm.rowBytes(), 0, 0)) {
++    return false;
++  }
++
++  base::span<uint8_t> modify_pixels =
++      gfx::SkPixmapToWritableSpan(pixmap_to_noise);
++
++  // Guaranteed to have a value, as per |ShouldApplyNoise|.
++  auto token_hash = NoiseHash(execution_context->CanvasNoiseToken().value());
++  NoisePixels(token_hash, modify_pixels, pixmap_to_noise.width(),
++              pixmap_to_noise.height());
++
++  auto noised_image = bm.asImage();
++  snapshot = blink::UnacceleratedStaticBitmapImage::Create(
++      std::move(noised_image), snapshot->Orientation());
++
++  constexpr int canvas_op_exclusive_max =
++      static_cast<int>(HighEntropyCanvasOpType::kMaxValue) << 1;
++  base::UmaHistogramExactLinear(
++      base::StrCat({kCanvasOperationMetricPrefix,
++                    GetContextTypeForMetrics(execution_context)}),
++      static_cast<int>(high_entropy_canvas_op_types), canvas_op_exclusive_max);
++
++  base::TimeDelta elapsed_time = base::TimeTicks::Now() - start_time;
++  base::UmaHistogramCustomMicrosecondsTimes(
++      "FingerprintingProtection.CanvasNoise.NoiseDuration", elapsed_time,
++      base::Microseconds(50), base::Milliseconds(100), 100);
++  base::UmaHistogramCounts1M("FingerprintingProtection.CanvasNoise.NoisedCanvasSize",
++                             pixmap_to_noise.width() * pixmap_to_noise.height());
++  UseCounter::Count(execution_context, WebFeature::kCanvasReadbackNoise);
++
++  return true;
+ }
+ 
+ }  // namespace blink
