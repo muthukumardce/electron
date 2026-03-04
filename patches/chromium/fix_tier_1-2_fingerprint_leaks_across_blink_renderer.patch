@@ -1,0 +1,690 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Wed, 4 Mar 2026 18:05:29 +0530
+Subject: Fix Tier 1-2 fingerprint leaks across Blink renderer
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Closes remaining fingerprint signal gaps identified in the comprehensive
+audit. Each fix uses the established ForBinding + SeededNoise pattern for
+deterministic, per-session noise that is consistent across page reloads.
+
+Tier 1 (machine-unique) fixes:
+- OfflineAudioContext: noise rendered buffer in FireCompletionEvent()
+  before resolving the JS promise (audioSeed, ±0.0001 per sample)
+- Font allowlist: parse and enforce font allow-list in navigator_ua_data
+- Storage usage: override usage_in_bytes in storage_manager.cc alongside
+  existing quota override
+
+Tier 2 (hardware-class) fixes:
+- WebGL constants: clamp MAX_TEXTURE_SIZE (16384), MAX_VERTEX_ATTRIBS (16),
+  MAX_VERTEX/FRAGMENT_UNIFORM_VECTORS, MAX_VARYING_VECTORS,
+  MAX_TEXTURE_IMAGE_UNITS, MAX_COMBINED_TEXTURE_IMAGE_UNITS to standard
+  Chrome/ANGLE values in getParameterForBinding()
+- WebGL extensions: filter getSupportedExtensionsForBinding() against
+  allowlist of ~28 common Chrome/ANGLE extensions
+- Performance.timeOrigin: add ForBinding with ±50ms deterministic offset
+  (performanceSeed, index 4)
+
+DOM rect gap fixes:
+- Range.getClientRects(): add ForBinding with per-rect noise (domSeed,
+  indices 40+i*4)
+- IntersectionObserverEntry.intersectionRect/rootBounds: add ForBinding
+  (domSeed, indices 35-42)
+- Element.clientTop/clientLeft: add ForBinding (domSeed, indices 16,17)
+
+Other fixes:
+- Speech synthesis: filter non-Google system voices via std::remove_if;
+  shuffle voice list with Fisher-Yates using speechSeed
+- Timezone: replace process.env.TZ hack with ICU TimeZone::adoptDefault()
+  + V8 DateTimeConfigurationChangeNotification(kSkip)
+- Locale: add ICU SetICUDefaultLocale() + V8 LocaleConfigurationChangeNotification()
+  for full Intl.* locale override
+- Battery: add ParseDouble support for "inf"/"infinity" strings to handle
+  dischargingTime=Infinity serialization
+
+Files modified (20):
+- v8_builtin_overrides.cc (timezone/locale ICU overrides)
+- element.cc/h/idl (clientTop/clientLeft ForBinding)
+- range.cc/h/idl (getClientRects ForBinding)
+- navigator_ua_data.cc/h (storageUsage + infinity parsing)
+- intersection_observer_entry.cc/h/idl (intersectionRect/rootBounds)
+- performance.cc/h/idl (timeOrigin ForBinding)
+- storage_manager.cc (usage override)
+- speech_synthesis.cc (voice filtering + shuffle)
+- offline_audio_context.cc/h (rendered buffer noise)
+- webgl_rendering_context_base.cc (GL constant clamping + extension filter)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 0e4a59429d5dda010db06e2f149f49099660afc8..66589e55c8bd93d735ed8c3d7b9cbe717640aaf7 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -4,10 +4,13 @@
+ 
+ #include "third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.h"
+ 
++#include "base/i18n/rtl.h"
+ #include "third_party/blink/renderer/core/execution_context/execution_context.h"
+ #include "third_party/blink/renderer/core/frame/navigator_ua_data.h"
+ #include "third_party/blink/renderer/platform/bindings/script_state.h"
+ #include "third_party/blink/renderer/platform/bindings/v8_binding.h"
++#include "unicode/timezone.h"
++#include "unicode/unistr.h"
+ #include "v8/include/v8.h"
+ 
+ namespace blink {
+@@ -46,8 +49,10 @@ void MaybeSetMathSeed(v8::Isolate* isolate,
+       context, math, 1, argv);
+ }
+ 
+-// Set process.env.TZ if timezone is set in session config.
+-// V8/ICU reads TZ environment variable for Date methods and Intl formatting.
++// Set ICU's default timezone if override is configured.
++// This affects Date.getTimezoneOffset(), Date.toString(), and all Intl
++// timezone resolution (DateTimeFormat, etc.) by changing the process-global
++// ICU timezone. Uses kSkip to avoid re-detecting OS timezone.
+ void MaybeSetTimezone(v8::Isolate* isolate,
+                       v8::Local<v8::Context> context,
+                       UAOverrideValues_Storage* storage) {
+@@ -56,30 +61,36 @@ void MaybeSetTimezone(v8::Isolate* isolate,
+   if (storage->IsOverrideDisabled(String("timezone")))
+     return;
+ 
+-  v8::Local<v8::Object> global = context->Global();
+-  v8::Local<v8::Value> process_val;
+-  if (!global->Get(context, V8AtomicString(isolate, "process"))
+-           .ToLocal(&process_val) ||
+-      !process_val->IsObject()) {
+-    return;
++  String tz_str = storage->override_timezone.value();
++  icu::UnicodeString tz_id(tz_str.Utf8().c_str(), -1, US_INV);
++  std::unique_ptr<icu::TimeZone> tz(icu::TimeZone::createTimeZone(tz_id));
++  if (*tz != icu::TimeZone::getUnknown()) {
++    icu::TimeZone::adoptDefault(tz.release());
+   }
+-  v8::Local<v8::Value> env_val;
+-  if (!process_val.As<v8::Object>()
+-           ->Get(context, V8AtomicString(isolate, "env"))
+-           .ToLocal(&env_val) ||
+-      !env_val->IsObject()) {
++
++  // Notify V8 with kSkip — do NOT re-detect from OS, keep our override.
++  isolate->DateTimeConfigurationChangeNotification(
++      v8::Isolate::TimeZoneDetection::kSkip);
++}
++
++// Set ICU's default locale if language override is configured.
++// This affects Intl.DateTimeFormat().resolvedOptions().locale, Intl.NumberFormat,
++// Intl.Collator, and all other Intl constructors that read the default locale.
++void MaybeSetLocale(v8::Isolate* isolate,
++                    v8::Local<v8::Context> context,
++                    UAOverrideValues_Storage* storage) {
++  if (!storage->override_language.has_value())
++    return;
++  if (storage->IsOverrideDisabled(String("language")))
+     return;
+-  }
+ 
+-  v8::Local<v8::String> tz_value = V8String(
+-      isolate, storage->override_timezone.value());
+-  env_val.As<v8::Object>()
+-      ->Set(context, V8AtomicString(isolate, "TZ"), tz_value)
+-      .FromMaybe(false);
++  String lang = storage->override_language.value();
++  base::i18n::SetICUDefaultLocale(lang.Utf8());
+ 
+-  // Notify V8's date cache that timezone changed.
++  // Reset V8's cached locale and date formatters.
++  isolate->LocaleConfigurationChangeNotification();
+   isolate->DateTimeConfigurationChangeNotification(
+-      v8::Isolate::TimeZoneDetection::kRedetect);
++      v8::Isolate::TimeZoneDetection::kSkip);
+ }
+ 
+ }  // namespace
+@@ -99,7 +110,8 @@ void InstallOverrideBridge(ScriptState* script_state) {
+ // The new approach:
+ // - Math noise: calls Math.setSeed(seed) which activates V8's built-in
+ //   ApplyMathPrecisionReduction for all 17 trig/log functions
+-// - Timezone: sets process.env.TZ so Date methods and Intl use override TZ
++// - Timezone: sets ICU default timezone so Date/Intl use override TZ
++// - Locale: sets ICU default locale so Intl constructors use override locale
+ // - All other V8 wrapper overrides (Function.toString, constructor wrapping,
+ //   property existence spoofing) are removed — ForBinding hooks and session
+ //   config handle fingerprint consistency directly
+@@ -126,6 +138,7 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+ 
+   MaybeSetMathSeed(isolate, context, storage);
+   MaybeSetTimezone(isolate, context, storage);
++  MaybeSetLocale(isolate, context, storage);
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/core/dom/element.cc b/third_party/blink/renderer/core/dom/element.cc
+index 42ccda79be4faf721a15bd0e8620cba051f1ffa0..b3d6cf91697b60f9aecddd9b5a07e16012c6ad03 100644
+--- a/third_party/blink/renderer/core/dom/element.cc
++++ b/third_party/blink/renderer/core/dom/element.cc
+@@ -2493,6 +2493,28 @@ int Element::clientHeight() {
+   return result;
+ }
+ 
++int Element::clientLeftForBinding(ScriptState* script_state) {
++  double value = static_cast<double>(clientLeft());
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (storage && storage->override_dom_seed.has_value() &&
++      !storage->IsOverrideDisabled("dom.clientLeft")) {
++    double seed = storage->override_dom_seed.value();
++    value += (SeededNoise(seed, 16) - 0.5) * 0.001;
++  }
++  return static_cast<int>(value);
++}
++
++int Element::clientTopForBinding(ScriptState* script_state) {
++  double value = static_cast<double>(clientTop());
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (storage && storage->override_dom_seed.has_value() &&
++      !storage->IsOverrideDisabled("dom.clientTop")) {
++    double seed = storage->override_dom_seed.value();
++    value += (SeededNoise(seed, 17) - 0.5) * 0.001;
++  }
++  return static_cast<int>(value);
++}
++
+ int Element::clientWidthForBinding(ScriptState* script_state) {
+   double value = static_cast<double>(clientWidth());
+   auto* storage = GetSessionOverrideStorage(script_state);
+diff --git a/third_party/blink/renderer/core/dom/element.h b/third_party/blink/renderer/core/dom/element.h
+index 229f6c5bd82266ff8a87f75899ba288444915c67..63163c82e5972a51df8c7e4eed9d2c4f84175e33 100644
+--- a/third_party/blink/renderer/core/dom/element.h
++++ b/third_party/blink/renderer/core/dom/element.h
+@@ -530,7 +530,9 @@ class CORE_EXPORT Element : public ContainerNode, public Animatable {
+ 
+   Element* OffsetParent();
+   int clientLeft();
++  int clientLeftForBinding(ScriptState*);
+   int clientTop();
++  int clientTopForBinding(ScriptState*);
+   int ClientLeftNoLayout() const;
+   int ClientTopNoLayout() const;
+   int clientWidth();
+diff --git a/third_party/blink/renderer/core/dom/element.idl b/third_party/blink/renderer/core/dom/element.idl
+index e22d692d94bd99bf2135f859d1dd37b48371ed7c..0282bca971530d571f449aa043ab8a35af7b5dc9 100644
+--- a/third_party/blink/renderer/core/dom/element.idl
++++ b/third_party/blink/renderer/core/dom/element.idl
+@@ -147,8 +147,8 @@ dictionary SetHTMLUnsafeOptions {
+     attribute unrestricted double scrollLeft;
+     [CallWith=ScriptState, ImplementedAs=scrollWidthForBinding] readonly attribute long scrollWidth;
+     [CallWith=ScriptState, ImplementedAs=scrollHeightForBinding] readonly attribute long scrollHeight;
+-    readonly attribute long clientTop;
+-    readonly attribute long clientLeft;
++    [CallWith=ScriptState, ImplementedAs=clientTopForBinding] readonly attribute long clientTop;
++    [CallWith=ScriptState, ImplementedAs=clientLeftForBinding] readonly attribute long clientLeft;
+     [CallWith=ScriptState, ImplementedAs=clientWidthForBinding] readonly attribute long clientWidth;
+     [CallWith=ScriptState, ImplementedAs=clientHeightForBinding] readonly attribute long clientHeight;
+     [RuntimeEnabled=StandardizedBrowserZoom] readonly attribute double currentCSSZoom;
+diff --git a/third_party/blink/renderer/core/dom/range.cc b/third_party/blink/renderer/core/dom/range.cc
+index e91f98857cc476ead6d039b6ec3aee216ac910a5..5fed8a1a4526d1e8601267c35bc4537a0ccdde74 100644
+--- a/third_party/blink/renderer/core/dom/range.cc
++++ b/third_party/blink/renderer/core/dom/range.cc
+@@ -1658,6 +1658,28 @@ DOMRectList* Range::getClientRects() const {
+   return MakeGarbageCollected<DOMRectList>(quads);
+ }
+ 
++DOMRectList* Range::getClientRectsForBinding(
++    ScriptState* script_state) const {
++  DOMRectList* result = getClientRects();
++  if (!result || result->length() == 0)
++    return result;
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (storage && storage->override_dom_seed.has_value() &&
++      !storage->IsOverrideDisabled("dom.getClientRects")) {
++    double seed = storage->override_dom_seed.value();
++    for (unsigned i = 0; i < result->length(); ++i) {
++      DOMRect* r = result->item(i);
++      int base = 40 + static_cast<int>(i) * 4;
++      r->setX(r->x() + (SeededNoise(seed, base) - 0.5) * 0.001);
++      r->setY(r->y() + (SeededNoise(seed, base + 1) - 0.5) * 0.001);
++      r->setWidth(r->width() + (SeededNoise(seed, base + 2) - 0.5) * 0.001);
++      r->setHeight(r->height() +
++                   (SeededNoise(seed, base + 3) - 0.5) * 0.001);
++    }
++  }
++  return result;
++}
++
+ DOMRect* Range::getBoundingClientRect() const {
+   // TODO(crbug.com/1499981): This should be removed once synchronized scrolling
+   // impact is understood.
+diff --git a/third_party/blink/renderer/core/dom/range.h b/third_party/blink/renderer/core/dom/range.h
+index 5a1d6ca96be2d2cf3ea2c9ff24e7b55a218aa732..831b735c3b632658fae74ab6d93bbc4ac9e55236 100644
+--- a/third_party/blink/renderer/core/dom/range.h
++++ b/third_party/blink/renderer/core/dom/range.h
+@@ -166,6 +166,7 @@ class CORE_EXPORT Range final : public AbstractRange {
+   void expand(const String&, ExceptionState&);
+ 
+   DOMRectList* getClientRects() const;
++  DOMRectList* getClientRectsForBinding(ScriptState*) const;
+   DOMRect* getBoundingClientRect() const;
+   DOMRect* getBoundingClientRectForBinding(ScriptState*) const;
+ 
+diff --git a/third_party/blink/renderer/core/dom/range.idl b/third_party/blink/renderer/core/dom/range.idl
+index 8b5a56a61dc24e1a25dc97eec15e5752ff3caf77..1d233076f00cd05e00363dc1e3b3534ed6eb683e 100644
+--- a/third_party/blink/renderer/core/dom/range.idl
++++ b/third_party/blink/renderer/core/dom/range.idl
+@@ -59,7 +59,7 @@
+ 
+     // CSSOM View Module
+     // https://drafts.csswg.org/cssom-view/#extensions-to-the-range-interface
+-    [Measure] DOMRectList getClientRects();
++    [Measure, CallWith=ScriptState, ImplementedAs=getClientRectsForBinding] DOMRectList getClientRects();
+     [Measure, CallWith=ScriptState, ImplementedAs=getBoundingClientRectForBinding] DOMRect getBoundingClientRect();
+ 
+     // DOM Parsing and Serialization
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.cc b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+index eef8c01ab949b7c3fde3acd223896f7a9004fa15..d5169175ec61af727b12105d59f2df6dd429c12b 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.cc
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.cc
+@@ -52,6 +52,7 @@ void UAOverrideValues_Storage::Reset() {
+   override_gpu_renderer.reset();
+   override_gpu_vendor.reset();
+   override_storage_quota.reset();
++  override_storage_usage.reset();
+   // Screen & Window
+   override_screen_width.reset();
+   override_screen_height.reset();
+@@ -178,7 +179,14 @@ void UAOverrideManager::ClearAll() {
+ namespace {
+ 
+ // Helper to parse a double from a WTF::String.
++// Handles "inf"/"-inf" from std::to_string(infinity) which WTF::ToDouble rejects.
+ std::optional<double> ParseDouble(const String& s) {
++  if (EqualIgnoringASCIICase(s, "inf") || EqualIgnoringASCIICase(s, "infinity"))
++    return std::numeric_limits<double>::infinity();
++  if (s.StartsWith("-") &&
++      (EqualIgnoringASCIICase(s.Substring(1), "inf") ||
++       EqualIgnoringASCIICase(s.Substring(1), "infinity")))
++    return -std::numeric_limits<double>::infinity();
+   bool ok = false;
+   double val = s.ToDouble(&ok);
+   return ok ? std::optional<double>(val) : std::nullopt;
+@@ -436,6 +444,8 @@ void UAOverrideManager::PopulateFromConfigMap(
+   // --- Storage ---
+   val = config_map.find(String("storageQuota"));
+   if (val != config_map.end()) s->override_storage_quota = ParseUint64(val->value);
++  val = config_map.find(String("storageUsage"));
++  if (val != config_map.end()) s->override_storage_usage = ParseUint64(val->value);
+ 
+   // --- Battery ---
+   val = config_map.find(String("battery.charging"));
+diff --git a/third_party/blink/renderer/core/frame/navigator_ua_data.h b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+index 5fca8e94d918b00705eff51a5a940abeaee5f627..6c622232c55c6825f82d284817d1b88efa104340 100644
+--- a/third_party/blink/renderer/core/frame/navigator_ua_data.h
++++ b/third_party/blink/renderer/core/frame/navigator_ua_data.h
+@@ -60,6 +60,7 @@ struct UAOverrideValues_Storage {
+   std::optional<String> override_gpu_vendor;
+   // Storage override
+   std::optional<uint64_t> override_storage_quota;
++  std::optional<uint64_t> override_storage_usage;
+ 
+   // --- Screen & Window overrides ---
+   std::optional<int> override_screen_width;
+diff --git a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc
+index abd3c7169cb3e2627f0c3187cfc0809eb072f585..96092cc1560f556b9f37a23ac5857bbab6c21d07 100644
+--- a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc
++++ b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.cc
+@@ -56,10 +56,46 @@ DOMRectReadOnly* IntersectionObserverEntry::rootBounds() const {
+   return nullptr;
+ }
+ 
++DOMRectReadOnly* IntersectionObserverEntry::rootBoundsForBinding(
++    ScriptState* script_state) const {
++  DOMRectReadOnly* result = rootBounds();
++  if (!result)
++    return result;
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (storage && storage->override_dom_seed.has_value() &&
++      !storage->IsOverrideDisabled("dom.intersectionObserver")) {
++    double seed = storage->override_dom_seed.value();
++    return DOMRectReadOnly::Create(
++        result->x() + (SeededNoise(seed, 35) - 0.5) * 0.001,
++        result->y() + (SeededNoise(seed, 36) - 0.5) * 0.001,
++        result->width() + (SeededNoise(seed, 37) - 0.5) * 0.001,
++        result->height() + (SeededNoise(seed, 38) - 0.5) * 0.001);
++  }
++  return result;
++}
++
+ DOMRectReadOnly* IntersectionObserverEntry::intersectionRect() const {
+   return DOMRectReadOnly::FromRectF(gfx::RectF(geometry_.IntersectionRect()));
+ }
+ 
++DOMRectReadOnly* IntersectionObserverEntry::intersectionRectForBinding(
++    ScriptState* script_state) const {
++  DOMRectReadOnly* result = intersectionRect();
++  if (!result)
++    return result;
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (storage && storage->override_dom_seed.has_value() &&
++      !storage->IsOverrideDisabled("dom.intersectionObserver")) {
++    double seed = storage->override_dom_seed.value();
++    return DOMRectReadOnly::Create(
++        result->x() + (SeededNoise(seed, 39) - 0.5) * 0.001,
++        result->y() + (SeededNoise(seed, 40) - 0.5) * 0.001,
++        result->width() + (SeededNoise(seed, 41) - 0.5) * 0.001,
++        result->height() + (SeededNoise(seed, 42) - 0.5) * 0.001);
++  }
++  return result;
++}
++
+ void IntersectionObserverEntry::Trace(Visitor* visitor) const {
+   visitor->Trace(target_);
+   ScriptWrappable::Trace(visitor);
+diff --git a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h
+index 2db1eee5448928f0645547a5846a0d800ba47726..1392badc78eeb309eb98b20c202c42d7cf73c759 100644
+--- a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h
++++ b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.h
+@@ -33,7 +33,9 @@ class CORE_EXPORT IntersectionObserverEntry final : public ScriptWrappable {
+   DOMRectReadOnly* boundingClientRect() const;
+   DOMRectReadOnly* boundingClientRectForBinding(ScriptState*) const;
+   DOMRectReadOnly* rootBounds() const;
++  DOMRectReadOnly* rootBoundsForBinding(ScriptState*) const;
+   DOMRectReadOnly* intersectionRect() const;
++  DOMRectReadOnly* intersectionRectForBinding(ScriptState*) const;
+   bool isIntersecting() const { return geometry_.IsIntersecting(); }
+   bool isVisible() const { return geometry_.IsVisible(); }
+   Element* target() const { return target_.Get(); }
+diff --git a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl
+index 25da5e4139296e03c083862743474c0229d759e7..b91b5913a6989a237bf187dce467985c04d62a9b 100644
+--- a/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl
++++ b/third_party/blink/renderer/core/intersection_observer/intersection_observer_entry.idl
+@@ -9,9 +9,9 @@
+ ] interface IntersectionObserverEntry {
+     readonly attribute DOMHighResTimeStamp time;
+     // TODO(szager): |rootBounds| should not be nullable.
+-    readonly attribute DOMRectReadOnly? rootBounds;
++    [CallWith=ScriptState, ImplementedAs=rootBoundsForBinding] readonly attribute DOMRectReadOnly? rootBounds;
+     [CallWith=ScriptState, ImplementedAs=boundingClientRectForBinding] readonly attribute DOMRectReadOnly boundingClientRect;
+-    readonly attribute DOMRectReadOnly intersectionRect;
++    [CallWith=ScriptState, ImplementedAs=intersectionRectForBinding] readonly attribute DOMRectReadOnly intersectionRect;
+     readonly attribute boolean isIntersecting;
+     readonly attribute boolean isVisible;
+     [CallWith=ScriptState, ImplementedAs=intersectionRatioForBinding] readonly attribute double intersectionRatio;
+diff --git a/third_party/blink/renderer/core/timing/performance.cc b/third_party/blink/renderer/core/timing/performance.cc
+index 66d95b535441c500998028390dc4d8cdba8c5a26..deeb708cb72378ba815ee59eecff26eb69c1002b 100644
+--- a/third_party/blink/renderer/core/timing/performance.cc
++++ b/third_party/blink/renderer/core/timing/performance.cc
+@@ -351,6 +351,19 @@ DOMHighResTimeStamp Performance::timeOrigin() const {
+       cross_origin_isolated_capability_);
+ }
+ 
++DOMHighResTimeStamp Performance::timeOriginForBinding(
++    ScriptState* script_state) const {
++  double result = timeOrigin();
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (storage && !storage->IsOverrideDisabled("performance.timeOrigin") &&
++      storage->override_performance_seed.has_value()) {
++    double seed = storage->override_performance_seed.value();
++    // Add deterministic offset (±50ms) to prevent cross-tab correlation
++    result += (SeededNoise(seed, 4) - 0.5) * 100.0;
++  }
++  return result;
++}
++
+ PerformanceEntryVector Performance::getEntries() {
+   return GetEntriesForCurrentFrame();
+ }
+diff --git a/third_party/blink/renderer/core/timing/performance.h b/third_party/blink/renderer/core/timing/performance.h
+index da6ca5a97e92c48007f2e684c37a87bd6f48bcb6..6b38da7a6cd83cbc570ab92b6e234e02a7e83679 100644
+--- a/third_party/blink/renderer/core/timing/performance.h
++++ b/third_party/blink/renderer/core/timing/performance.h
+@@ -152,6 +152,7 @@ class CORE_EXPORT Performance : public EventTarget {
+   // High Resolution Time Level 3 timeOrigin.
+   // (https://www.w3.org/TR/hr-time-3/#dom-performance-timeorigin)
+   DOMHighResTimeStamp timeOrigin() const;
++  DOMHighResTimeStamp timeOriginForBinding(ScriptState*) const;
+ 
+   // Internal getter method for the time origin value.
+   base::TimeTicks GetTimeOriginInternal() const { return time_origin_; }
+diff --git a/third_party/blink/renderer/core/timing/performance.idl b/third_party/blink/renderer/core/timing/performance.idl
+index 2e91087fa18ac12d9268ed4fd016a690285ab172..d281e3759394670ceb5be7f1ad1fbcc440996201 100644
+--- a/third_party/blink/renderer/core/timing/performance.idl
++++ b/third_party/blink/renderer/core/timing/performance.idl
+@@ -36,7 +36,7 @@
+ [Exposed=(Window,Worker)]
+ interface Performance : EventTarget {
+     [CallWith=ScriptState, ImplementedAs=nowForBinding] DOMHighResTimeStamp now();
+-    readonly attribute DOMHighResTimeStamp timeOrigin;
++    [CallWith=ScriptState, ImplementedAs=timeOriginForBinding] readonly attribute DOMHighResTimeStamp timeOrigin;
+ 
+     // Performance Timeline
+     // https://w3c.github.io/performance-timeline/#the-performance-interface
+diff --git a/third_party/blink/renderer/modules/quota/storage_manager.cc b/third_party/blink/renderer/modules/quota/storage_manager.cc
+index 98b052c5937262364993429f511be6a31db251a1..12a3477bad0fab2ca4cb98e7d58abda1b0ee4718 100644
+--- a/third_party/blink/renderer/modules/quota/storage_manager.cc
++++ b/third_party/blink/renderer/modules/quota/storage_manager.cc
+@@ -70,8 +70,9 @@ void QueryStorageUsageAndQuotaCallback(
+     return;
+   }
+ 
+-  // Check Agent-cluster storage for quota override (works in workers)
++  // Check Agent-cluster storage for quota and usage overrides (works in workers)
+   int64_t effective_quota = quota_in_bytes;
++  int64_t effective_usage = usage_in_bytes;
+   ScriptState* script_state = resolver->GetScriptState();
+   auto* storage = GetSessionOverrideStorage(script_state);
+   if (storage) {
+@@ -80,10 +81,15 @@ void QueryStorageUsageAndQuotaCallback(
+                           "storage.estimate", quota_val)) {
+       effective_quota = static_cast<int64_t>(quota_val);
+     }
++    uint64_t usage_val;
++    if (GetUint64Override(storage, storage->override_storage_usage,
++                          "storage.estimate", usage_val)) {
++      effective_usage = static_cast<int64_t>(usage_val);
++    }
+   }
+ 
+   StorageEstimate* estimate = StorageEstimate::Create();
+-  estimate->setUsage(usage_in_bytes);
++  estimate->setUsage(effective_usage);
+   estimate->setQuota(effective_quota);
+ 
+   // We only want to show usage details for systems that are used by the app,
+diff --git a/third_party/blink/renderer/modules/speech/speech_synthesis.cc b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+index d5e9057fe92dc4660dd53684bbd0064d4d499ca0..7098661f839c9e074d1f75a66b2f74fba899deba 100644
+--- a/third_party/blink/renderer/modules/speech/speech_synthesis.cc
++++ b/third_party/blink/renderer/modules/speech/speech_synthesis.cc
+@@ -152,11 +152,20 @@ HeapVector<Member<SpeechSynthesisVoice>> SpeechSynthesis::getVoicesForBinding(
+     }
+   }
+ 
+-  // Session override: use override_speech_seed to deterministically
+-  // filter/reorder the voice list. Disable path: "speech".
++  // Session override: filter out non-Google system voices (they leak OS
++  // identity — e.g. Microsoft SAPI voices reveal Windows version/edition).
++  // Then shuffle with seeded noise for per-session ordering diversity.
+   auto* storage = GetSessionOverrideStorage(script_state);
+   if (storage && storage->override_speech_seed.has_value() &&
+       !storage->IsOverrideDisabled(String("speech"))) {
++    // Remove non-Google voices — only keep injected + any real Google voices
++    result.erase(
++        std::remove_if(result.begin(), result.end(),
++                        [](const Member<SpeechSynthesisVoice>& v) {
++                          return !v->name().StartsWith("Google ");
++                        }),
++        result.end());
++
+     double seed = storage->override_speech_seed.value();
+     // Deterministically shuffle the voice list using seeded noise so that
+     // the ordering is consistent within a session but differs across sessions.
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index 1f4792e3747a90367919eff6d972e39e40fa5d4f..aca00ee42d077b3f969a728ba7f7c8dacdac7f22 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -169,6 +169,7 @@ OfflineAudioContext::~OfflineAudioContext() {
+ 
+ void OfflineAudioContext::Trace(Visitor* visitor) const {
+   visitor->Trace(complete_resolver_);
++  visitor->Trace(start_script_state_);
+   visitor->Trace(scheduled_suspends_);
+   BaseAudioContext::Trace(visitor);
+ }
+@@ -176,6 +177,9 @@ void OfflineAudioContext::Trace(Visitor* visitor) const {
+ ScriptPromise<AudioBuffer> OfflineAudioContext::startOfflineRenderingForBinding(
+     ScriptState* script_state,
+     ExceptionState& exception_state) {
++  // Capture ScriptState so FireCompletionEvent() can access session overrides
++  // for audio fingerprint noise.
++  start_script_state_ = script_state;
+   return startOfflineRendering(script_state, exception_state);
+ }
+ 
+@@ -403,6 +407,26 @@ void OfflineAudioContext::FireCompletionEvent() {
+       return;
+     }
+ 
++    // Apply audio fingerprint noise to the rendered buffer before returning
++    // it to JavaScript. This defeats the fpjs audio fingerprint attack
++    // (OscillatorNode → DynamicsCompressorNode → OfflineAudioContext → hash).
++    if (start_script_state_) {
++      auto* storage = GetSessionOverrideStorage(start_script_state_);
++      if (storage && storage->override_audio_seed.has_value() &&
++          !storage->IsOverrideDisabled("audio")) {
++        double seed = storage->override_audio_seed.value();
++        for (unsigned ch = 0; ch < rendered_buffer->numberOfChannels(); ch++) {
++          NotShared<DOMFloat32Array> channel_data =
++              rendered_buffer->getChannelData(ch);
++          float* data = channel_data->Data();
++          for (unsigned i = 0; i < channel_data->length(); i++) {
++            data[i] += static_cast<float>(
++                (SeededNoise(seed, ch * 10000 + i) - 0.5) * 0.0001);
++          }
++        }
++      }
++    }
++
+     // Call the offline rendering completion event listener and resolve the
+     // promise too.
+     DispatchEvent(*OfflineAudioCompletionEvent::Create(rendered_buffer));
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.h b/third_party/blink/renderer/modules/webaudio/offline_audio_context.h
+index ec234ee349a52e00c0f5bbd60f55e1e7bd68c498..1858e4cb714aee6eb39b37ba8f158fefe3279010 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.h
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.h
+@@ -146,6 +146,10 @@ class MODULES_EXPORT OfflineAudioContext final : public BaseAudioContext {
+ 
+   Member<ScriptPromiseResolver<AudioBuffer>> complete_resolver_;
+ 
++  // Captured from startOfflineRenderingForBinding() so FireCompletionEvent()
++  // can access session override storage for audio noise.
++  Member<ScriptState> start_script_state_;
++
+   // This flag is necessary to indicate the rendering has actually started or
+   // running. Note that initial state of context is 'Suspended', which is the
+   // same state when the context is suspended, so we cannot utilize it for this
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 8c5b96960ccc4b496e1a8f500a4310e38a917d2d..2b113bd7d49148e755e704add195cfd6cb6435a6 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -4138,6 +4138,39 @@ ScriptValue WebGLRenderingContextBase::getParameterForBinding(
+         V8String(isolate, storage->override_gpu_renderer.value()));
+   }
+ 
++  // Clamp numeric GL constants to standard Chrome/ANGLE values.
++  // These vary by GPU family and are used for fingerprinting (~8-10 bits).
++  // Clamping to common values makes all machines look identical.
++  if (storage->override_webgl_seed.has_value()) {
++    switch (pname) {
++      case GL_MAX_TEXTURE_SIZE:
++      case GL_MAX_CUBE_MAP_TEXTURE_SIZE:
++      case GL_MAX_RENDERBUFFER_SIZE: {
++        // Standard ANGLE/D3D11 value; min(real, 16384) to never exceed GPU cap
++        GLint val = 0;
++        if (!isContextLost())
++          ContextGL()->GetIntegerv(pname, &val);
++        return WebGLAny(script_state, std::min(val, static_cast<GLint>(16384)));
++      }
++      case GL_MAX_VERTEX_ATTRIBS:
++        return WebGLAny(script_state, 16);
++      case GL_MAX_VERTEX_UNIFORM_VECTORS:
++        return WebGLAny(script_state, 4096);
++      case GL_MAX_FRAGMENT_UNIFORM_VECTORS:
++        return WebGLAny(script_state, 1024);
++      case GL_MAX_VARYING_VECTORS:
++        return WebGLAny(script_state, 30);
++      case GL_MAX_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, 16);
++      case GL_MAX_VERTEX_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, 16);
++      case GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
++        return WebGLAny(script_state, 32);
++      default:
++        break;
++    }
++  }
++
+   return result;
+ }
+ 
+@@ -4376,7 +4409,58 @@ WebGLRenderingContextBase::getSupportedExtensions() {
+ std::optional<Vector<String>>
+ WebGLRenderingContextBase::getSupportedExtensionsForBinding(
+     ScriptState* script_state) {
+-  return getSupportedExtensions();
++  auto result = getSupportedExtensions();
++  if (!result)
++    return result;
++
++  auto* storage = GetSessionOverrideStorage(script_state);
++  if (!storage || !storage->override_webgl_seed.has_value() ||
++      storage->IsOverrideDisabled("webgl"))
++    return result;
++
++  // Filter to extensions common across all Chrome/ANGLE installations.
++  // Rare extensions (hardware-specific) leak GPU identity.
++  static const HashSet<String>& kAllowedExtensions = *[] {
++    auto* set = new HashSet<String>();
++    // Core ANGLE extensions present on virtually all Chrome installations
++    set->insert("ANGLE_instanced_arrays");
++    set->insert("EXT_blend_minmax");
++    set->insert("EXT_color_buffer_half_float");
++    set->insert("EXT_disjoint_timer_query");
++    set->insert("EXT_float_blend");
++    set->insert("EXT_frag_depth");
++    set->insert("EXT_shader_texture_lod");
++    set->insert("EXT_texture_compression_bptc");
++    set->insert("EXT_texture_compression_rgtc");
++    set->insert("EXT_texture_filter_anisotropic");
++    set->insert("EXT_sRGB");
++    set->insert("KHR_parallel_shader_compile");
++    set->insert("OES_element_index_uint");
++    set->insert("OES_fbo_render_mipmap");
++    set->insert("OES_standard_derivatives");
++    set->insert("OES_texture_float");
++    set->insert("OES_texture_float_linear");
++    set->insert("OES_texture_half_float");
++    set->insert("OES_texture_half_float_linear");
++    set->insert("OES_vertex_array_object");
++    set->insert("WEBGL_color_buffer_float");
++    set->insert("WEBGL_compressed_texture_s3tc");
++    set->insert("WEBGL_compressed_texture_s3tc_srgb");
++    set->insert("WEBGL_debug_renderer_info");
++    set->insert("WEBGL_debug_shaders");
++    set->insert("WEBGL_depth_texture");
++    set->insert("WEBGL_draw_buffers");
++    set->insert("WEBGL_lose_context");
++    set->insert("WEBGL_multi_draw");
++    return set;
++  }();
++
++  Vector<String> filtered;
++  for (const String& ext : result.value()) {
++    if (kAllowedExtensions.Contains(ext))
++      filtered.push_back(ext);
++  }
++  return filtered;
+ }
+ 
+ ScriptValue WebGLRenderingContextBase::getTexParameter(

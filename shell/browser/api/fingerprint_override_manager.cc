@@ -360,6 +360,8 @@ FingerprintConfig::SerializeToFlatMap() const {
 
   if (storage_quota.has_value())
     m["storageQuota"] = std::to_string(storage_quota.value());
+  if (storage_usage.has_value())
+    m["storageUsage"] = std::to_string(storage_usage.value());
 
   if (battery.has_value()) {
     const auto& b = battery.value();

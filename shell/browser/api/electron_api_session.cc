@@ -1179,8 +1179,9 @@ void Session::SetFingerprintOverrides(v8::Local<v8::Value> val,
     config->fonts = std::move(fonts);
   }
 
-  // --- Parse storageQuota ---
+  // --- Parse storageQuota and storageUsage ---
   options.GetOptional("storageQuota", &config->storage_quota);
+  options.GetOptional("storageUsage", &config->storage_usage);
 
   // --- Parse battery section ---
   gin_helper::Dictionary battery_dict;

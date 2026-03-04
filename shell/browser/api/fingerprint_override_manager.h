@@ -153,6 +153,7 @@ struct FingerprintConfig {
   std::optional<Seeds> seeds;
   std::optional<Fonts> fonts;
   std::optional<double> storage_quota;
+  std::optional<double> storage_usage;
   std::optional<Battery> battery;
 
   // Granular disable list: e.g., "screen.colorDepth", "audio", etc.
