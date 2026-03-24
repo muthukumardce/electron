@@ -92,14 +92,17 @@ static void SetDefaultFolder(IFileDialog* dialog,
     dialog->SetFolder(folder_item);
 }
 
-static HRESULT ShowFileDialog(IFileDialog* dialog,
-                              const DialogSettings& settings) {
-  HWND parent_window =
-      settings.parent_window
-          ? static_cast<electron::NativeWindowViews*>(settings.parent_window)
-                ->GetAcceleratedWidget()
-          : nullptr;
+// Extract the parent HWND from settings. Must be called on the UI thread
+// since GetAcceleratedWidget() has sequence checker enforcement.
+static HWND GetParentHWND(const DialogSettings& settings) {
+  return settings.parent_window
+             ? static_cast<electron::NativeWindowViews*>(
+                   settings.parent_window)
+                   ->GetAcceleratedWidget()
+             : nullptr;
+}
 
+static HRESULT ShowFileDialog(IFileDialog* dialog, HWND parent_window) {
   return dialog->Show(parent_window);
 }
 
@@ -154,10 +157,11 @@ static void ApplySettings(IFileDialog* dialog, const DialogSettings& settings) {
   }
 }
 
-}  // namespace
-
-bool ShowOpenDialogSync(const DialogSettings& settings,
-                        std::vector<base::FilePath>* paths) {
+// Internal open dialog implementation that takes a pre-extracted HWND.
+// Safe to call from any thread (dialog thread or UI thread).
+bool RunOpenDialog(const DialogSettings& settings,
+                   HWND parent_hwnd,
+                   std::vector<base::FilePath>* paths) {
   ATL::CComPtr<IFileOpenDialog> file_open_dialog;
   HRESULT hr = file_open_dialog.CoCreateInstance(CLSID_FileOpenDialog);
 
@@ -178,7 +182,7 @@ bool ShowOpenDialogSync(const DialogSettings& settings,
   file_open_dialog->SetOptions(options);
 
   ApplySettings(file_open_dialog, settings);
-  hr = ShowFileDialog(file_open_dialog, settings);
+  hr = ShowFileDialog(file_open_dialog, parent_hwnd);
   if (FAILED(hr))
     return false;
 
@@ -209,22 +213,10 @@ bool ShowOpenDialogSync(const DialogSettings& settings,
   return true;
 }
 
-void ShowOpenDialog(const DialogSettings& settings,
-                    gin_helper::Promise<gin_helper::Dictionary> promise) {
-  auto done = [](gin_helper::Promise<gin_helper::Dictionary> promise,
-                 bool success, std::vector<base::FilePath> result) {
-    v8::HandleScope handle_scope(promise.isolate());
-    auto dict = gin::Dictionary::CreateEmpty(promise.isolate());
-    dict.Set("canceled", !success);
-    dict.Set("filePaths", result);
-    promise.Resolve(dict);
-  };
-  dialog_thread::Run(base::BindOnce(ShowOpenDialogSync, settings),
-                     base::BindOnce(done, std::move(promise)));
-}
-
-std::optional<base::FilePath> ShowSaveDialogSync(
-    const DialogSettings& settings) {
+// Internal save dialog implementation that takes a pre-extracted HWND.
+// Safe to call from any thread (dialog thread or UI thread).
+std::optional<base::FilePath> RunSaveDialog(const DialogSettings& settings,
+                                            HWND parent_hwnd) {
   ATL::CComPtr<IFileSaveDialog> file_save_dialog;
   HRESULT hr = file_save_dialog.CoCreateInstance(CLSID_FileSaveDialog);
   if (FAILED(hr))
@@ -238,7 +230,7 @@ std::optional<base::FilePath> ShowSaveDialogSync(
 
   file_save_dialog->SetOptions(options);
   ApplySettings(file_save_dialog, settings);
-  hr = ShowFileDialog(file_save_dialog, settings);
+  hr = ShowFileDialog(file_save_dialog, parent_hwnd);
 
   if (FAILED(hr))
     return {};
@@ -258,8 +250,40 @@ std::optional<base::FilePath> ShowSaveDialogSync(
   return path;
 }
 
+}  // namespace
+
+bool ShowOpenDialogSync(const DialogSettings& settings,
+                        std::vector<base::FilePath>* paths) {
+  return RunOpenDialog(settings, GetParentHWND(settings), paths);
+}
+
+void ShowOpenDialog(const DialogSettings& settings,
+                    gin_helper::Promise<gin_helper::Dictionary> promise) {
+  // Extract HWND on the UI thread before posting to the dialog thread.
+  // GetAcceleratedWidget() has sequence checker enforcement in Chromium 144+.
+  HWND parent_hwnd = GetParentHWND(settings);
+  auto done = [](gin_helper::Promise<gin_helper::Dictionary> promise,
+                 bool success, std::vector<base::FilePath> result) {
+    v8::HandleScope handle_scope(promise.isolate());
+    auto dict = gin::Dictionary::CreateEmpty(promise.isolate());
+    dict.Set("canceled", !success);
+    dict.Set("filePaths", result);
+    promise.Resolve(dict);
+  };
+  dialog_thread::Run(base::BindOnce(RunOpenDialog, settings, parent_hwnd),
+                     base::BindOnce(done, std::move(promise)));
+}
+
+std::optional<base::FilePath> ShowSaveDialogSync(
+    const DialogSettings& settings) {
+  return RunSaveDialog(settings, GetParentHWND(settings));
+}
+
 void ShowSaveDialog(const DialogSettings& settings,
                     gin_helper::Promise<gin_helper::Dictionary> promise) {
+  // Extract HWND on the UI thread before posting to the dialog thread.
+  // GetAcceleratedWidget() has sequence checker enforcement in Chromium 144+.
+  HWND parent_hwnd = GetParentHWND(settings);
   auto done = [](gin_helper::Promise<gin_helper::Dictionary> promise,
                  std::optional<base::FilePath> result) {
     v8::HandleScope handle_scope(promise.isolate());
@@ -268,7 +292,7 @@ void ShowSaveDialog(const DialogSettings& settings,
     dict.Set("filePath", result.value_or(base::FilePath{}));
     promise.Resolve(dict);
   };
-  dialog_thread::Run(base::BindOnce(ShowSaveDialogSync, settings),
+  dialog_thread::Run(base::BindOnce(RunSaveDialog, settings, parent_hwnd),
                      base::BindOnce(done, std::move(promise)));
 }
 

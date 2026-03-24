@@ -87,6 +87,7 @@
 #include "services/service_manager/public/cpp/interface_provider.h"
 #include "shell/browser/api/electron_api_browser_window.h"
 #include "shell/browser/api/electron_api_debugger.h"
+#include "shell/browser/api/fingerprint_override_manager.h"
 #include "shell/browser/api/electron_api_web_frame_main.h"
 #include "shell/browser/api/frame_subscriber.h"
 #include "shell/browser/api/message_port.h"
@@ -2040,6 +2041,15 @@ SkRegion* WebContents::draggable_region() {
 void WebContents::DidStartNavigation(
     content::NavigationHandle* navigation_handle) {
   base::AutoReset<bool> resetter(&is_safe_to_delete_, false);
+
+  // If a fingerprint UA override is active for this session, mark every
+  // navigation as overriding the user agent so the renderer's
+  // ShouldUseUserAgentOverride() returns true and reads from
+  // renderer_preferences_ instead of the default UA.
+  if (!web_contents()->GetUserAgentOverride().ua_string_override.empty()) {
+    navigation_handle->SetIsOverridingUserAgent(true);
+  }
+
   EmitNavigationEvent("did-start-navigation", navigation_handle);
 }
 
@@ -2739,10 +2749,20 @@ void WebContents::ForcefullyCrashRenderer() {
 void WebContents::SetUserAgent(const std::string& user_agent) {
   blink::UserAgentOverride ua_override;
   ua_override.ua_string_override = user_agent;
-  if (!user_agent.empty())
-    ua_override.ua_metadata_override = embedder_support::GetUserAgentMetadata();
+  if (!user_agent.empty()) {
+    // Prefer fingerprint override metadata (matches our spoofed identity);
+    // fall back to default Chrome metadata for plain SetUserAgent() calls.
+    const auto* fp_metadata =
+        electron::FingerprintOverrideManager::GetInstance()
+            .GetOverrideMetadata();
+    ua_override.ua_metadata_override =
+        fp_metadata ? *fp_metadata
+                    : embedder_support::GetUserAgentMetadata();
+  }
 
-  web_contents()->SetUserAgentOverride(ua_override, false);
+  // override_in_new_tabs=true so renderer-initiated navigations also use
+  // the override (ShouldOverrideUserAgentForRendererInitiatedNavigation).
+  web_contents()->SetUserAgentOverride(ua_override, true);
 }
 
 std::string WebContents::GetUserAgent() {

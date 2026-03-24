@@ -60,7 +60,10 @@
 #include "services/network/public/cpp/features.h"
 #include "services/network/public/cpp/request_destination.h"
 #include "services/network/public/mojom/clear_data_filter.mojom.h"
+#include "content/public/browser/navigation_controller.h"
+#include "content/public/browser/navigation_entry.h"
 #include "shell/browser/api/electron_api_app.h"
+#include "shell/browser/api/electron_api_web_contents.h"
 #include "shell/browser/api/electron_api_cookies.h"
 #include "shell/browser/api/electron_api_data_pipe_holder.h"
 #include "shell/browser/api/electron_api_download_item.h"
@@ -1217,6 +1220,33 @@ void Session::SetFingerprintOverrides(v8::Local<v8::Value> val,
       if (!ua_string.empty()) {
         browser_context_->SetUserAgent(ua_string);
         network_context->SetUserAgent(ua_string);
+
+        // Build full UserAgentOverride with metadata for the native path.
+        // This makes navigator.userAgent, navigator.userAgentData, and
+        // Client Hints all read from Chrome's native renderer_preferences_
+        // instead of detectable ForBinding hooks.
+        blink::UserAgentOverride ua_override;
+        ua_override.ua_string_override = ua_string;
+        const auto* metadata =
+            FingerprintOverrideManager::GetInstance().GetOverrideMetadata();
+        if (metadata) {
+          ua_override.ua_metadata_override = *metadata;
+        }
+
+        // Apply to all existing WebContents in this session.
+        // override_in_new_tabs=true ensures new navigations also use the
+        // override (sets ShouldOverrideUserAgentForRendererInitiatedNavigation).
+        for (auto* wc : api::WebContents::GetWebContentsList()) {
+          if (wc->web_contents()->GetBrowserContext() == browser_context()) {
+            wc->web_contents()->SetUserAgentOverride(ua_override, true);
+            // Mark the current navigation entry so ShouldUseUserAgentOverride()
+            // returns true in the renderer.
+            auto& controller = wc->web_contents()->GetController();
+            if (auto* entry = controller.GetLastCommittedEntry()) {
+              entry->SetIsOverridingUserAgent(true);
+            }
+          }
+        }
       }
     }
 
@@ -1225,6 +1255,17 @@ void Session::SetFingerprintOverrides(v8::Local<v8::Value> val,
       if (!accept_header.empty()) {
         network_context->SetAcceptLanguage(
             net::HttpUtil::GenerateAcceptLanguageHeader(accept_header));
+
+        // Also update renderer_preferences_.accept_languages on all WebContents
+        // so navigator.language/languages reads the spoofed value via Chrome's
+        // native path (ChromeClientImpl::AcceptLanguages → renderer_preferences_).
+        for (auto* wc : api::WebContents::GetWebContentsList()) {
+          if (wc->web_contents()->GetBrowserContext() == browser_context()) {
+            auto* prefs = wc->web_contents()->GetMutableRendererPrefs();
+            prefs->accept_languages = accept_header;
+            wc->web_contents()->SyncRendererPrefs();
+          }
+        }
       }
     }
   }
