@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Wed, 8 Apr 2026 04:33:44 +0530
+Subject: Fix timezone, locale, and math seed overrides broken by ForBinding
+ migration
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The ForBinding→native path migration (e45cfa1426ff9) set has_override=false
+unconditionally in PopulateFromConfigMap() to eliminate Cloudflare-detectable
+timing overhead. However, InstallV8BuiltinOverrides() in v8_builtin_overrides.cc
+still gated on has_override before calling MaybeSetTimezone(), MaybeSetLocale(),
+and MaybeSetMathSeed(). With has_override always false, all three were silently
+skipped — timezone showed the real machine timezone (e.g. IST instead of the
+configured proxy timezone), Intl locale was not overridden, and Math precision
+reduction via Math.setSeed() was never applied.
+
+Root cause:
+  PopulateFromConfigMap() sets s->has_override = false (line 504)
+  InstallV8BuiltinOverrides() checked storage->has_override (line 129)
+  → Early return, MaybeSetTimezone/MaybeSetLocale/MaybeSetMathSeed never called
+
+Fix:
+  Switch from GetStorageForCluster() + has_override check to
+  GetFallbackStorageFast() (lock-free raw pointer read, no has_override gate).
+  This is the same path all native ForBinding replacements already use.
+  The timezone/locale/math values are stored in fallback storage by
+  PopulateFromConfigMap() and are now read correctly.
+
+APIs restored by this fix:
+  - Date.getTimezoneOffset(), Intl.DateTimeFormat TZ, Date.toString() TZ
+  - Intl.DateTimeFormat/NumberFormat/Collator locale
+  - Math.sin/cos/tan/etc precision reduction via Math.setSeed()
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
+diff --git a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+index 66589e55c8bd93d735ed8c3d7b9cbe717640aaf7..e3d167524a301a9a5056f0bd4dd46d3c102094e7 100644
+--- a/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
++++ b/third_party/blink/renderer/bindings/core/v8/v8_builtin_overrides.cc
+@@ -123,10 +123,13 @@ void InstallV8BuiltinOverrides(ScriptState* script_state) {
+   if (!exec_context)
+     return;
+ 
+-  base::UnguessableToken cluster_id = exec_context->GetAgentClusterID();
++  // Use the lock-free fallback storage path (same as native ForBinding
++  // replacements). Do NOT gate on has_override — it is always false after
++  // the ForBinding→native migration, but timezone/locale/math seeds are
++  // still stored in the fallback storage and must be applied.
+   UAOverrideValues_Storage* storage =
+-      UAOverrideManager::GetInstance().GetStorageForCluster(cluster_id);
+-  if (!storage || !storage->has_override)
++      UAOverrideManager::GetInstance().GetFallbackStorageFast();
++  if (!storage)
+     return;
+ 
+   v8::Isolate* isolate = script_state->GetIsolate();
