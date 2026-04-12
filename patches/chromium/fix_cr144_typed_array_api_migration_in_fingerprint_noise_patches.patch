@@ -1,0 +1,213 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Sun, 12 Apr 2026 14:14:03 +0530
+Subject: Fix Cr144 typed array API migration in fingerprint noise patches
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Chromium 144 migrated DOMFloat32Array/DOMUint8Array from raw pointer
+access (Data()/length()) to base::span (AsSpan()/size()). This broke
+the fingerprint noise injection in WebAudio and WebGL patches that were
+written against the older API.
+
+Changes:
+- webaudio/analyser_node.cc: Migrate getFloatFrequencyData,
+  getByteFrequencyData, getFloatTimeDomainData, getByteTimeDomainData
+  noise loops from array->Data()/length() to array->AsSpan()/size()
+- webaudio/audio_buffer.cc: Migrate getChannelData noise loop
+- webaudio/offline_audio_context.cc: Migrate FireCompletionEvent
+  rendered buffer noise loop
+- webgl/webgl2_rendering_context_base.cc: Migrate getBufferSubData
+  and both readPixels overloads from raw uint8_t* to base::span;
+  add missing #include "base/containers/span.h"
+- webgl/webgl_rendering_context_base.cc: Migrate readPixels noise
+  loop; add missing #include "base/containers/span.h"
+
+All noise logic unchanged — only the buffer access pattern updated
+to match Cr144 Blink typed array API.
+
+Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>
+
+diff --git a/third_party/blink/renderer/modules/webaudio/analyser_node.cc b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+index facb923df1056b42f01d3af517dd84523c85d0f6..2c3d9cedb59002d0de11bf84d84cc696ab051936 100644
+--- a/third_party/blink/renderer/modules/webaudio/analyser_node.cc
++++ b/third_party/blink/renderer/modules/webaudio/analyser_node.cc
+@@ -124,9 +124,9 @@ void AnalyserNode::getFloatFrequencyData(NotShared<DOMFloat32Array> array) {
+   if (storage && storage->override_audio_seed.has_value() &&
+       !storage->IsOverrideDisabled("audio")) {
+     double seed = storage->override_audio_seed.value();
+-    float* data = array->Data();
+-    for (unsigned i = 0; i < array->length(); i++) {
+-      data[i] += static_cast<float>((SeededNoise(seed, i) - 0.5) * 0.0001);
++    auto span = array->AsSpan();
++    for (unsigned i = 0; i < span.size(); i++) {
++      span[i] += static_cast<float>((SeededNoise(seed, i) - 0.5) * 0.0001);
+     }
+   }
+ }
+@@ -138,10 +138,10 @@ void AnalyserNode::getByteFrequencyData(NotShared<DOMUint8Array> array) {
+   if (storage && storage->override_audio_seed.has_value() &&
+       !storage->IsOverrideDisabled("audio")) {
+     double seed = storage->override_audio_seed.value();
+-    uint8_t* data = array->Data();
+-    for (unsigned i = 0; i < array->length(); i++) {
+-      data[i] = static_cast<uint8_t>(
+-          std::min(255.0, std::max(0.0, static_cast<double>(data[i]) +
++    auto span = array->AsSpan();
++    for (unsigned i = 0; i < span.size(); i++) {
++      span[i] = static_cast<uint8_t>(
++          std::min(255.0, std::max(0.0, static_cast<double>(span[i]) +
+                                             (SeededNoise(seed, i) - 0.5) * 0.1)));
+     }
+   }
+@@ -153,9 +153,9 @@ void AnalyserNode::getFloatTimeDomainData(NotShared<DOMFloat32Array> array) {
+   if (storage && storage->override_audio_seed.has_value() &&
+       !storage->IsOverrideDisabled("audio")) {
+     double seed = storage->override_audio_seed.value();
+-    float* data = array->Data();
+-    for (unsigned i = 0; i < array->length(); i++) {
+-      data[i] += static_cast<float>((SeededNoise(seed, i) - 0.5) * 0.0001);
++    auto span = array->AsSpan();
++    for (unsigned i = 0; i < span.size(); i++) {
++      span[i] += static_cast<float>((SeededNoise(seed, i) - 0.5) * 0.0001);
+     }
+   }
+ }
+@@ -166,10 +166,10 @@ void AnalyserNode::getByteTimeDomainData(NotShared<DOMUint8Array> array) {
+   if (storage && storage->override_audio_seed.has_value() &&
+       !storage->IsOverrideDisabled("audio")) {
+     double seed = storage->override_audio_seed.value();
+-    uint8_t* data = array->Data();
+-    for (unsigned i = 0; i < array->length(); i++) {
+-      data[i] = static_cast<uint8_t>(
+-          std::min(255.0, std::max(0.0, static_cast<double>(data[i]) +
++    auto span = array->AsSpan();
++    for (unsigned i = 0; i < span.size(); i++) {
++      span[i] = static_cast<uint8_t>(
++          std::min(255.0, std::max(0.0, static_cast<double>(span[i]) +
+                                             (SeededNoise(seed, i) - 0.5) * 0.1)));
+     }
+   }
+diff --git a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+index 194622f91ed8f4afe1ab3a7deaa0d75eb41b668f..1dac448a573b1a9d0667efc2a169f070ee885643 100644
+--- a/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
++++ b/third_party/blink/renderer/modules/webaudio/audio_buffer.cc
+@@ -223,9 +223,9 @@ NotShared<DOMFloat32Array> AudioBuffer::getChannelData(
+   if (storage && storage->override_audio_seed.has_value() &&
+       !storage->IsOverrideDisabled("audio")) {
+     double seed = storage->override_audio_seed.value();
+-    float* data = result->Data();
+-    for (unsigned i = 0; i < result->length(); i++) {
+-      data[i] += static_cast<float>((SeededNoise(seed, i) - 0.5) * 0.0001);
++    auto span = result->AsSpan();
++    for (unsigned i = 0; i < span.size(); i++) {
++      span[i] += static_cast<float>((SeededNoise(seed, i) - 0.5) * 0.0001);
+     }
+   }
+ 
+diff --git a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+index 2215516b58599e98dfb0de2d36d87af3ed85a2de..450057a81a52ce6850e558a7097c4c735ec86c23 100644
+--- a/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
++++ b/third_party/blink/renderer/modules/webaudio/offline_audio_context.cc
+@@ -408,9 +408,9 @@ void OfflineAudioContext::FireCompletionEvent() {
+         for (unsigned ch = 0; ch < rendered_buffer->numberOfChannels(); ch++) {
+           NotShared<DOMFloat32Array> channel_data =
+               rendered_buffer->getChannelData(ch);
+-          float* data = channel_data->Data();
+-          for (unsigned i = 0; i < channel_data->length(); i++) {
+-            data[i] += static_cast<float>(
++          auto span = channel_data->AsSpan();
++          for (unsigned i = 0; i < span.size(); i++) {
++            span[i] += static_cast<float>(
+                 (SeededNoise(seed, ch * 10000 + i) - 0.5) * 0.0001);
+           }
+         }
+diff --git a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+index b7ad5c90dff7d9688cea04fc54fe210ce9469538..73d100b8d69c6e9694854e2d8a70f2003bfe81b2 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl2_rendering_context_base.cc
+@@ -8,6 +8,7 @@
+ 
+ #include "base/compiler_specific.h"
+ #include "base/containers/heap_array.h"
++#include "base/containers/span.h"
+ #include "base/numerics/checked_math.h"
+ #include "base/numerics/safe_conversions.h"
+ #include "gpu/command_buffer/client/gles2_interface.h"
+@@ -466,11 +467,10 @@ void WebGL2RenderingContextBase::getBufferSubData(
+       if (storage->override_webgl_seed.has_value() &&
+           !storage->IsOverrideDisabled("webgl")) {
+         double seed = storage->override_webgl_seed.value();
+-        uint8_t* data = static_cast<uint8_t*>(
+-            dst_data.Get()->BaseAddressMaybeShared());
+-        unsigned byte_length = dst_data.Get()->byteLength();
+-        for (unsigned i = 0; i < byte_length; i++) {
+-          data[i] += static_cast<uint8_t>(
++        auto span = UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(
++            dst_data.Get()->BaseAddressMaybeShared()), dst_data.Get()->byteLength()));
++        for (unsigned i = 0; i < span.size(); i++) {
++          span[i] += static_cast<uint8_t>(
+               (SeededNoise(seed, i) - 0.5) * 2.0);
+         }
+       }
+@@ -866,11 +866,10 @@ void WebGL2RenderingContextBase::readPixels(
+           !storage->IsOverrideDisabled("webgl.readPixels") &&
+           !storage->IsOverrideDisabled("webgl")) {
+         double seed = storage->override_webgl_seed.value();
+-        uint8_t* data = static_cast<uint8_t*>(
+-            pixels.Get()->BaseAddressMaybeShared());
+-        unsigned length = pixels.Get()->byteLength();
+-        for (unsigned i = 0; i < length; i++) {
+-          data[i] += static_cast<uint8_t>(
++        auto span = UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(
++            pixels.Get()->BaseAddressMaybeShared()), pixels.Get()->byteLength()));
++        for (unsigned i = 0; i < span.size(); i++) {
++          span[i] += static_cast<uint8_t>(
+               (SeededNoise(seed, i) - 0.5) * 2.0);
+         }
+       }
+@@ -904,11 +903,10 @@ void WebGL2RenderingContextBase::readPixels(
+           !storage->IsOverrideDisabled("webgl.readPixels") &&
+           !storage->IsOverrideDisabled("webgl")) {
+         double seed = storage->override_webgl_seed.value();
+-        uint8_t* data = static_cast<uint8_t*>(
+-            pixels.Get()->BaseAddressMaybeShared());
+-        unsigned length = pixels.Get()->byteLength();
+-        for (unsigned i = 0; i < length; i++) {
+-          data[i] += static_cast<uint8_t>(
++        auto span = UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(
++            pixels.Get()->BaseAddressMaybeShared()), pixels.Get()->byteLength()));
++        for (unsigned i = 0; i < span.size(); i++) {
++          span[i] += static_cast<uint8_t>(
+               (SeededNoise(seed, i) - 0.5) * 2.0);
+         }
+       }
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 0adbe7ae14384f0cff803cb26f791bc086e2febc..2f69ad38dae5613e1d51b8213e237ac76fb0fe47 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -31,6 +31,7 @@
+ #include "base/bit_cast.h"
+ #include "base/compiler_specific.h"
+ #include "base/containers/contains.h"
++#include "base/containers/span.h"
+ #include "base/feature_list.h"
+ #include "base/memory/scoped_refptr.h"
+ #include "base/metrics/histogram_functions.h"
+@@ -5174,11 +5175,10 @@ void WebGLRenderingContextBase::readPixels(
+           !storage->IsOverrideDisabled("webgl.readPixels") &&
+           !storage->IsOverrideDisabled("webgl")) {
+         double seed = storage->override_webgl_seed.value();
+-        uint8_t* data = static_cast<uint8_t*>(
+-            pixels.Get()->BaseAddressMaybeShared());
+-        unsigned length = pixels.Get()->byteLength();
+-        for (unsigned i = 0; i < length; i++) {
+-          data[i] += static_cast<uint8_t>(
++        auto span = UNSAFE_BUFFERS(base::span(static_cast<uint8_t*>(
++            pixels.Get()->BaseAddressMaybeShared()), pixels.Get()->byteLength()));
++        for (unsigned i = 0; i < span.size(); i++) {
++          span[i] += static_cast<uint8_t>(
+               (SeededNoise(seed, i) - 0.5) * 2.0);
+         }
+       }
