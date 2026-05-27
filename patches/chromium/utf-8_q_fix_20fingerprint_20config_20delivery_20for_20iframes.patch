@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Thu, 28 May 2026 00:25:32 +0530
+Subject: =?UTF-8?q?Fix=20fingerprint=20config=20delivery=20for=20iframes?=
+ =?UTF-8?q?=20(Site=20Isolation)=20and=0Amulti-RVH=20std::move=20bug?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+CommitNavigation() previously sent the session-level fingerprint
+overrides to the renderer only when the navigating frame was the main
+frame, because the override-config dispatch was inside the same
+`if (is main frame) { … }` block as the canvas-noise-token dispatch.
+With Site Isolation, a cross-origin iframe commits in a *different
+renderer process* than its parent, so the iframe's renderer never
+received the config.
+
+The Blink-side override-storage classes that the config feeds —
+BatteryManager, UAOverrideManager, NavigatorConcurrentHardware,
+ApproximatedDeviceMemory, FontCache and the rest — are all per-process
+`static` storage. Without the config push, an iframe's static storage
+stays empty and navigator.getBattery(), navigator.userAgent,
+navigator.hardwareConcurrency, screen.*, etc. all return the real
+system values inside the iframe while the parent frame returns the
+spoofed ones. Bot managers (Akamai, Cloudflare, Datadome) that
+correlate sensor data across iframes detect the mismatch trivially.
+
+Move the UpdateFingerprintConfig dispatch out of the main-frame
+conditional so it runs on every CommitNavigation, regardless of frame
+type. Cross-origin subframe commits now push the config to their
+renderer process the first time they commit, so their static override
+storage is populated before any document JS reads it.
+
+Second, independent bug: inside the ExecutePageBroadcastMethod loop,
+the optional fingerprint_config was being `std::move`'d into the call.
+ExecutePageBroadcastMethod iterates over every RenderViewHost in the
+page broadcast group; the first RVH would consume the moved-from
+optional and every subsequent RVH would receive an empty config. Take
+a copy ahead of the lambda and pass it by reference so each RVH
+iteration sees the full value. (Note `*fingerprint_config` to deref
+the optional — we already checked it is engaged.)
+
+Verified on FalconBrowser by loading a page that embeds a cross-origin
+iframe and reading navigator.userAgent + navigator.hardwareConcurrency
+in both the parent frame and the iframe via DevTools. Before this fix
+the iframe returned the real machine's 32 cores and the real Electron
+UA; after the fix both frames return the same spoofed values.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+diff --git a/content/browser/renderer_host/render_frame_host_impl.cc b/content/browser/renderer_host/render_frame_host_impl.cc
+index 94ef5bcaae0b439bfeb9232dde537fe3abdc8b5b..06f89c26c2c21cc3b4eecc5e1d72a9dc69d8547a 100644
+--- a/content/browser/renderer_host/render_frame_host_impl.cc
++++ b/content/browser/renderer_host/render_frame_host_impl.cc
+@@ -12420,20 +12420,33 @@ void RenderFrameHostImpl::CommitNavigation(
+             broadcast->UpdateCanvasNoiseToken(canvas_noise_token);
+           }
+         });
++  }
+ 
+-    // Send session-level fingerprint overrides to the renderer.
+-    // This populates the renderer-side UAOverrideManager so all ForBinding
+-    // hooks can read override values directly from C++ storage.
++  // Send session-level fingerprint overrides to the renderer on EVERY frame
++  // commit (main frame AND subframes). With Site Isolation, a cross-origin
++  // iframe commits in a *different renderer process* than its parent. The
++  // override-storage classes in Blink (BatteryManager, UAOverrideManager,
++  // NavigatorConcurrentHardware, ApproximatedDeviceMemory, FontCache, etc.)
++  // are all per-process `static` storage. Without pushing the config to the
++  // iframe's renderer process, its static overrides stay empty and Battery /
++  // UA / screen / hardware APIs return real system values — instantly
++  // inconsistent with the parent frame and trivially detectable by bot
++  // managers that correlate sensor data across iframes.
++  {
+     BrowserContext* browser_context =
+         frame_tree_node()->navigator().controller().GetBrowserContext();
+     auto fingerprint_config =
+         GetContentClient()->browser()->GetFingerprintConfig(browser_context);
+     if (fingerprint_config) {
++      // Capture by value so each RVH iteration gets its own copy. The previous
++      // implementation moved the optional inside the lambda, leaving every
++      // RVH after the first with an empty config (a second bug independent
++      // from the main-frame-only one above).
++      auto config_to_send = *fingerprint_config;
+       frame_tree()->root()->render_manager()->ExecutePageBroadcastMethod(
+-          [&fingerprint_config](RenderViewHostImpl* rvh) {
++          [&config_to_send](RenderViewHostImpl* rvh) {
+             if (auto& broadcast = rvh->GetAssociatedPageBroadcast()) {
+-              broadcast->UpdateFingerprintConfig(
+-                  std::move(fingerprint_config));
++              broadcast->UpdateFingerprintConfig(config_to_send);
+             }
+           });
+     }

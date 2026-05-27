@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Thu, 28 May 2026 00:20:53 +0530
+Subject: Revert anti-fingerprint TLS + HTTP/2 SETTINGS randomization
+
+These two changes inverted the intended threat model. The "make every
+session look unique" jitter produced TLS / HTTP-2 SETTINGS hashes that
+match no known stock Chrome build, which is precisely the signal
+Akamai / Cloudflare / Datadome use to flag automation. Reverting both
+restores Chrome-canonical, deterministic-per-build bytes.
+
+== net/http/http_network_session.cc ==
+
+Remove the jitter block from AddDefaultHttp2Settings():
+
+    http2_settings[spdy::SETTINGS_HEADER_TABLE_SIZE] +=
+        static_cast<int32_t>(base::RandGenerator(8192)) - 4096;
+    http2_settings[spdy::SETTINGS_INITIAL_WINDOW_SIZE] +=
+        static_cast<int32_t>(base::RandGenerator(131072)) - 65536;
+    http2_settings[spdy::SETTINGS_MAX_HEADER_LIST_SIZE] +=
+        static_cast<int32_t>(base::RandGenerator(16384)) - 8192;
+
+Observed Falcon emission BEFORE this revert (via tls.peet.ws):
+
+    1:62528;2:0;4:6246171;6:262579|15663105|0|m,a,s,p
+    akamai_fingerprint_hash = 0cad8318a3b8e1f99cfbdf9846b5cff2
+
+All three numeric SETTINGS were off by a random delta within the jitter
+window (65536-3008, 6291456-45285, 262144+435), producing a fingerprint
+hash that no stock Chrome build emits. Bot managers that fingerprint the
+HTTP/2 SETTINGS frame (Akamai notably) get an instant "not real Chrome"
+signal on every HTTPS connection before any JS even runs.
+
+Observed Falcon emission AFTER this revert:
+
+    1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p
+    akamai_fingerprint_hash = 52d84b11737d980aef856699f885ca86
+
+This is the canonical Chrome 144 hash, matching every stock Chrome
+session on every machine.
+
+== net/socket/ssl_client_socket_impl.cc ==
+
+Two changes in SSLClientSocketImpl::Init():
+
+1. Removed Fisher-Yates shuffle of TLS supported_groups + the parallel
+   re-sync of key_shares. Restored the original `const` declarations
+   in their natural order so the ClientHello sends groups in Chrome's
+   fixed canonical order.
+
+2. Removed the random TLS 1.2 cipher-drop block that excluded each of
+   {ECDHE_ECDSA_CHACHA20_POLY1305, ECDHE_RSA_CHACHA20_POLY1305,
+   ECDHE_ECDSA_AES_256_GCM_SHA384, ECDHE_RSA_AES_256_GCM_SHA384} with
+   1/3 probability. The dropped ciphers caused the JA4 cipher count to
+   bounce between 11-15 per session, producing JA4 hashes that match
+   no published Chrome fingerprint.
+
+Observed JA4 BEFORE this revert (one session sample):
+
+    t13d1416h2_4f2acddecbd5_d8a2da3f94cd   (14 ciphers)
+
+AFTER this revert:
+
+    t13d1516h2_8daaf6152771_d8a2da3f94cd   (15 ciphers, every session)
+
+This is Chrome 144's deterministic JA4 for the supported-groups +
+cipher-list combination, matching every stock Chrome 144 build.
+
+== Rationale ==
+
+TLS / HTTP-2 SETTINGS fingerprints identify the *browser build*, not
+the machine. Same Chrome 144 on Windows / Mac / Linux / different
+hardware produces byte-identical hashes. Bot detectors maintain a
+database of known-good Chrome hashes and match against them; anything
+not in the database is flagged.
+
+Randomizing those bytes per-session does the OPPOSITE of evading
+detection - it guarantees we never match. The fingerprint to defeat
+isn't "are all sessions from this user identical" (they should be);
+it's "does each session match a known stock Chrome build" (it must).
+
+This commit reverts the bytes only. The hunks in the corresponding
+Electron-side patch file
+(electron/patches/chromium/anti-fingerprint_tls_ja4_randomization_http_2_jitter_cdc_rename.patch)
+also need to be removed in a separate commit on that repo so a clean
+gclient-sync + apply-all-patches doesn't reintroduce the regression.
+
+Verified by post-rebuild measurement against https://tls.peet.ws/api/all
+on FalconBrowser; both JA4 and akamai_fingerprint_hash now match
+published Chrome 144 values exactly.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+
+diff --git a/net/http/http_network_session.cc b/net/http/http_network_session.cc
+index ce7036ba651cd40b75adcd310772a8eddde5154b..8306a71b26506385faa6543e45aa691eee1cceed 100644
+--- a/net/http/http_network_session.cc
++++ b/net/http/http_network_session.cc
+@@ -81,14 +81,6 @@ spdy::SettingsMap AddDefaultHttp2Settings(spdy::SettingsMap http2_settings) {
+         kSpdyMaxHeaderListSize;
+   }
+ 
+-  // Add jitter to HTTP/2 SETTINGS to vary fingerprint per-session.
+-  http2_settings[spdy::SETTINGS_HEADER_TABLE_SIZE] +=
+-      static_cast<int32_t>(base::RandGenerator(8192)) - 4096;
+-  http2_settings[spdy::SETTINGS_INITIAL_WINDOW_SIZE] +=
+-      static_cast<int32_t>(base::RandGenerator(131072)) - 65536;
+-  http2_settings[spdy::SETTINGS_MAX_HEADER_LIST_SIZE] +=
+-      static_cast<int32_t>(base::RandGenerator(16384)) - 8192;
+-
+   return http2_settings;
+ }
+ 
+diff --git a/net/socket/ssl_client_socket_impl.cc b/net/socket/ssl_client_socket_impl.cc
+index 585355317e81c886abc2d50fff76c879b59558c4..9cb2c324e9df15709e9043ca3622d21773b323c2 100644
+--- a/net/socket/ssl_client_socket_impl.cc
++++ b/net/socket/ssl_client_socket_impl.cc
+@@ -676,32 +676,14 @@ int SSLClientSocketImpl::Init() {
+     return ERR_UNEXPECTED;
+   }
+ 
+-  std::vector<uint16_t> supported_groups =
++  const std::vector<uint16_t> supported_groups =
+       context_->config().GetSupportedGroups();
+-  std::vector<uint16_t> key_shares =
+-      context_->config().GetSupportedGroups(/*key_shares_only=*/true);
+-  // Shuffle supported groups to vary JA3/JA4 fingerprint per-connection.
+-  {
+-    size_t ks_count = key_shares.size();
+-    // Shuffle key-share portion (first ks_count entries).
+-    for (size_t i = ks_count; i > 1; --i) {
+-      size_t j = base::RandGenerator(i);
+-      std::swap(supported_groups[j], supported_groups[i - 1]);
+-    }
+-    // Shuffle non-key-share portion.
+-    for (size_t i = supported_groups.size(); i > ks_count + 1; --i) {
+-      size_t j = ks_count + base::RandGenerator(i - ks_count);
+-      std::swap(supported_groups[j], supported_groups[i - 1]);
+-    }
+-    // Keep key_shares order consistent with supported_groups.
+-    for (size_t i = 0; i < ks_count; ++i) {
+-      key_shares[i] = supported_groups[i];
+-    }
+-  }
+   if (!SSL_set1_group_ids(ssl_.get(), supported_groups.data(),
+                           supported_groups.size())) {
+     return ERR_UNEXPECTED;
+   }
++  const std::vector<uint16_t> key_shares =
++      context_->config().GetSupportedGroups(/*key_shares_only=*/true);
+   if (!key_shares.empty() &&
+       !SSL_set1_client_key_shares(ssl_.get(), key_shares.data(),
+                                   key_shares.size())) {
+@@ -779,26 +761,6 @@ int SSLClientSocketImpl::Init() {
+     }
+   }
+ 
+-  // Randomly exclude optional TLS 1.2 ciphers to vary JA4 fingerprint.
+-  // Each excluded cipher has a functional equivalent (AES-128-GCM) remaining.
+-  {
+-    static constexpr uint16_t kDroppable[] = {
+-        0xCCA9,  // ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+-        0xCCA8,  // ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256
+-        0xC02C,  // ECDHE_ECDSA_WITH_AES_256_GCM_SHA384
+-        0xC030,  // ECDHE_RSA_WITH_AES_256_GCM_SHA384
+-    };
+-    for (uint16_t id : kDroppable) {
+-      if (base::RandGenerator(3) == 0) {
+-        const SSL_CIPHER* cipher = SSL_get_cipher_by_value(id);
+-        if (cipher) {
+-          command.append(":!");
+-          command.append(SSL_CIPHER_get_name(cipher));
+-        }
+-      }
+-    }
+-  }
+-
+   if (!SSL_set_strict_cipher_list(ssl_.get(), command.c_str())) {
+     LOG(ERROR) << "SSL_set_cipher_list('" << command << "') failed";
+     return ERR_UNEXPECTED;
