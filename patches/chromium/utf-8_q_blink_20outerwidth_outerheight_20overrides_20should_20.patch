@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Thu, 28 May 2026 08:56:25 +0530
+Subject: =?UTF-8?q?Blink:=20outerWidth/outerHeight=20overrides=20should=20?=
+ =?UTF-8?q?read=20availWidth/Height,=0Anot=20Width/Height?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+LocalDOMWindow::outerWidth() / outerHeight() were pulling their
+Settings-side fingerprint overrides from GetScreenWidthOverride() /
+GetScreenHeightOverride() — the screen-resource fields. That produced
+window.outerWidth == screen.width and window.outerHeight ==
+screen.height, which on real hardware is only possible when Chrome is
+running borderless / true-fullscreen. On every normal desktop session
+(taskbar present, window maximized but not fullscreen), real Chrome
+returns outerWidth/Height == availWidth/Height — i.e. the screen size
+minus the OS chrome (taskbar, menu bar). The equality
+outerHeight == screen.height is therefore a strong bot-/automation
+tell that anti-fingerprinting libraries (fpjs, creepjs, pixelscan,
+incolumitas) actively check.
+
+Switch both overrides to GetScreenAvailWidthOverride() and
+GetScreenAvailHeightOverride() so a maximized FalconBrowser window
+reports the same outerWidth/Height pattern as a maximized real
+Chrome window. On setups with no side taskbar, availWidth ==
+screen.width and there is no visible change; on Windows with a
+bottom taskbar (the common case) availHeight == screen.height -
+taskbar_px, which is what real Chrome reports.
+
+The override comes from the fingerprint config the browser pushes
+into Settings via the native UpdateFingerprintConfig path. That
+config already populates both kScreen{Width,Height}Override and
+kScreenAvail{Width,Height}Override based on the profile's claimed
+display geometry, so this is a pure pick-the-right-field change — no
+plumbing or config-shape work required.
+
+Inline comments added at both call sites explain the reasoning so
+that future refactors don't quietly switch back to the Width/Height
+fields. The screen.width / screen.height getters (elsewhere in this
+file) continue to read GetScreenWidth/HeightOverride and are
+unaffected — those are still meant to report the full physical
+resolution.
+
+Verified manually: in a maximized FalconBrowser window on Windows
+with a bottom taskbar, window.outerHeight now reports
+screen.availHeight (1187), distinct from screen.height (1235),
+matching real Chrome's behavior.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+
+diff --git a/third_party/blink/renderer/core/frame/local_dom_window.cc b/third_party/blink/renderer/core/frame/local_dom_window.cc
+index 06b6e4c2e0b48c74157cc6ca979fb5ec8533718f..2983cbd17f06aecbaa259af5946fc345ad0869db 100644
+--- a/third_party/blink/renderer/core/frame/local_dom_window.cc
++++ b/third_party/blink/renderer/core/frame/local_dom_window.cc
+@@ -1618,7 +1618,11 @@ int LocalDOMWindow::outerHeight() const {
+   }
+ 
+   // Check Settings override (set via native path from fingerprint config).
+-  int override_val = frame->GetSettings()->GetScreenHeightOverride();
++  // outerHeight on a real maximized Chrome window equals screen.availHeight
++  // (= screen.height minus the taskbar), NOT screen.height. Reporting
++  // screen.height here would produce outerHeight == screen.height, which is
++  // only possible for fullscreen/borderless mode — a strong bot signal.
++  int override_val = frame->GetSettings()->GetScreenAvailHeightOverride();
+   if (override_val > 0)
+     return override_val;
+ 
+@@ -1648,7 +1652,11 @@ int LocalDOMWindow::outerWidth() const {
+   }
+ 
+   // Check Settings override (set via native path from fingerprint config).
+-  int override_val = frame->GetSettings()->GetScreenWidthOverride();
++  // Match the outerHeight rule: a real maximized Chrome window's outerWidth
++  // equals screen.availWidth (usually identical to screen.width on most
++  // setups, but distinct when there's a side taskbar). Using availWidth is
++  // the conservative correct choice.
++  int override_val = frame->GetSettings()->GetScreenAvailWidthOverride();
+   if (override_val > 0)
+     return override_val;
+ 
