@@ -46,6 +46,7 @@
 #include "services/network/public/mojom/network_context.mojom.h"
 #include "shell/browser/cookie_change_notifier.h"
 #include "shell/browser/electron_browser_client.h"
+#include "shell/browser/electron_client_hints_controller_delegate.h"
 #include "shell/browser/electron_browser_main_parts.h"
 #include "shell/browser/electron_download_manager_delegate.h"
 #include "shell/browser/electron_permission_manager.h"
@@ -629,7 +630,15 @@ ElectronBrowserContext::GetBrowsingDataRemoverDelegate() {
 
 content::ClientHintsControllerDelegate*
 ElectronBrowserContext::GetClientHintsControllerDelegate() {
-  return nullptr;
+  // Lazily instantiate so we don't pay the cost for contexts that never
+  // make a network request. Once created the delegate lives for the
+  // lifetime of the BrowserContext — Chromium expects the pointer
+  // returned here to remain stable across calls.
+  if (!client_hints_controller_delegate_) {
+    client_hints_controller_delegate_ =
+        std::make_unique<ElectronClientHintsControllerDelegate>(this);
+  }
+  return client_hints_controller_delegate_.get();
 }
 
 content::StorageNotificationService*

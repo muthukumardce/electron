@@ -42,6 +42,7 @@ class SpecialStoragePolicy;
 namespace electron {
 
 class CookieChangeNotifier;
+class ElectronClientHintsControllerDelegate;
 class ElectronDownloadManagerDelegate;
 class ElectronPermissionManager;
 class ElectronPreconnectManagerDelegate;
@@ -197,6 +198,12 @@ class ElectronBrowserContext : public content::BrowserContext {
   std::unique_ptr<ElectronPreconnectManagerDelegate>
       preconnect_manager_delegate_;
   std::unique_ptr<ProtocolRegistry> protocol_registry_;
+  // Lazily created by GetClientHintsControllerDelegate(). Needed so the
+  // network stack actually emits Sec-CH-UA* headers — without a delegate
+  // content/browser/client_hints/client_hints.cc short-circuits and no
+  // client hints are sent at all.
+  std::unique_ptr<ElectronClientHintsControllerDelegate>
+      client_hints_controller_delegate_;
 
   std::optional<std::string> user_agent_;
   base::FilePath path_;

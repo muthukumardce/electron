@@ -62,6 +62,7 @@
 #endif
 
 #include "chrome/renderer/loadtimes_extension_bindings.h"       // nogncheck
+#include "shell/renderer/electron_chrome_app_extension.h"
 
 #if BUILDFLAG(ENABLE_WIDEVINE)
 #include "components/cdm/renderer/widevine_key_system_info.h"  // nogncheck
@@ -221,6 +222,15 @@ void RendererClientBase::RenderThreadStarted() {
   // Fingerprinting services check for their absence to detect headless mode.
   blink::WebScriptController::RegisterExtension(
       extensions_v8::LoadTimesExtension::Get());
+
+  // Install chrome.app on the global chrome object of every renderer.
+  // Stock Electron leaves window.chrome with only the non-enumerable
+  // loadTimes/csi methods registered above, so Object.keys(window.chrome)
+  // returns [] and JSON.stringify is "{}". Akamai's bot sensor flags that
+  // — real Chrome always ships an enumerable chrome.app stub. See
+  // ElectronChromeAppExtension's header for the exact shape we mirror.
+  blink::WebScriptController::RegisterExtension(
+      electron::ElectronChromeAppExtension::Get());
 
   // Enable MessagePort close event by default.
   // The feature got reverted from stable to test in

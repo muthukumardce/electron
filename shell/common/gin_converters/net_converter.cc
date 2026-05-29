@@ -244,12 +244,50 @@ v8::Local<v8::Value> Converter<net::HttpRequestHeaders>::ToV8(
 bool Converter<net::HttpRequestHeaders>::FromV8(v8::Isolate* isolate,
                                                 v8::Local<v8::Value> val,
                                                 net::HttpRequestHeaders* out) {
-  base::Value::Dict dict;
-  if (!ConvertFromV8(isolate, val, &dict))
+  // PRESERVE INSERTION ORDER. The previous implementation routed through
+  // base::Value::Dict, which is an alphabetically-sorted container, so a
+  // JS object like {accept, sec-fetch-site, sec-fetch-mode, user-agent}
+  // came out as {accept, sec-fetch-mode, sec-fetch-site, user-agent}.
+  // net::HttpRequestHeaders is internally a HeaderVector and DOES preserve
+  // order; serializing to HTTP/2 frames preserves that order on the wire.
+  // Sorted alphabetical header order is itself a bot-detection signal
+  // (real Chrome emits a very specific Chromium-decided order — Akamai's
+  // `_abck` sensor flags any deviation).
+  //
+  // Iterate v8::Object::GetOwnPropertyNames(): per the ECMAScript spec
+  // [[OwnPropertyKeys]], string-keyed properties are returned in
+  // insertion order. That's exactly the order JS code wrote them in,
+  // which is the order we want on the wire.
+  if (val.IsEmpty() || !val->IsObject())
     return false;
-  for (const auto it : dict) {
-    if (it.second.is_string())
-      out->SetHeader(it.first, std::move(it.second).TakeString());
+
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+  v8::Local<v8::Object> obj = val.As<v8::Object>();
+
+  v8::Local<v8::Array> property_names;
+  if (!obj->GetOwnPropertyNames(context).ToLocal(&property_names))
+    return false;
+
+  uint32_t length = property_names->Length();
+  for (uint32_t i = 0; i < length; ++i) {
+    v8::Local<v8::Value> key;
+    if (!property_names->Get(context, i).ToLocal(&key))
+      continue;
+
+    v8::Local<v8::Value> value;
+    if (!obj->Get(context, key).ToLocal(&value))
+      continue;
+    if (!value->IsString())
+      continue;
+
+    std::string key_str;
+    std::string value_str;
+    if (!gin::ConvertFromV8(isolate, key, &key_str))
+      continue;
+    if (!gin::ConvertFromV8(isolate, value, &value_str))
+      continue;
+
+    out->SetHeader(key_str, value_str);
   }
   return true;
 }

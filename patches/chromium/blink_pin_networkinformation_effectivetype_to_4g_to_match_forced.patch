@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Muthukumar <muthukumardce@gmail.com>
+Date: Fri, 29 May 2026 06:37:06 +0530
+Subject: Blink: pin NetworkInformation::effectiveType to 4g to match forced
+ rtt/downlink
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+navigator.connection was already overridden to report a fast desktop
+profile when not observing change events: rtt()=50ms and downlink()=10Mbps.
+However effectiveType() still deferred to the NetworkQualityEstimator, so a
+slow proxy would drag the reported value to '3g' while rtt stayed pinned at
+50ms.
+
+That combination is internally contradictory — '3g' implies an RTT of
+roughly >=270ms, not 50ms — and anti-bot scoring (e.g. Akamai) flags the
+navigator.connection object as inconsistent. Akamai does not cross-check the
+reported rtt against the real network latency (stock Chrome reports rtt:0/4g
+through the same slow proxy and passes); it only checks that the connection
+object is self-consistent.
+
+Pin effectiveType() to k4G in the non-observing branch so the trio
+(effectiveType=4g, rtt=50, downlink=10) presents a single coherent fast
+profile matching what stock desktop Chrome reports through a slow proxy.
+Update the rtt()/downlink() comments to document the pairing.
+
+diff --git a/third_party/blink/renderer/modules/netinfo/network_information.cc b/third_party/blink/renderer/modules/netinfo/network_information.cc
+index 92f01c147c5ee22a4371b8ddfd3b6413e4659d2d..4e35e19a5665eb676a949b5940127944fa289e6d 100644
+--- a/third_party/blink/renderer/modules/netinfo/network_information.cc
++++ b/third_party/blink/renderer/modules/netinfo/network_information.cc
+@@ -122,8 +122,11 @@ V8EffectiveConnectionType NetworkInformation::effectiveType() {
+   // effective_type_ is only updated when listening for events, so ask
+   // networkStateNotifier if not listening (crbug.com/379841).
+   if (!IsObserving()) {
+-    return V8EffectiveConnectionType(EffectiveConnectionTypeToEnum(
+-        GetNetworkStateNotifier().EffectiveType()));
++    // Pin to 4g to MATCH the forced rtt()=50 / downlink()=10 fast profile.
++    // A slow proxy otherwise makes NQE report '3g' here while rtt stays 50,
++    // an internal contradiction anti-bot scoring flags. Stock Chrome shows a
++    // consistent 4g/low-rtt profile even through a slow proxy.
++    return V8EffectiveConnectionType(V8EffectiveConnectionType::Enum::k4G);
+   }
+ 
+   // If observing, return m_type which changes when the event fires, per spec.
+@@ -141,8 +144,14 @@ uint32_t NetworkInformation::rtt() {
+   }
+ 
+   if (!IsObserving()) {
+-    // Return a typical desktop Chrome RTT (50ms) instead of NQE 4G defaults
+-    // (175ms→200ms) which are unusual for desktop browsers.
++    // Desktop Chrome reports a fast, internally-consistent profile (low rtt +
++    // effectiveType 4g) even through a slow proxy. Keep rtt at a realistic
++    // desktop 50ms; effectiveType() below is pinned to 4g to MATCH it. Without
++    // that pin, a slow proxy drags effectiveType to '3g' while rtt stays 50 —
++    // a self-contradiction (3g implies rtt >= ~270ms) that anti-bot scoring
++    // flags. Akamai does not cross-check rtt vs real latency (stock Chrome
++    // reports rtt:0/4g through the same slow proxy and passes); it checks that
++    // navigator.connection is self-consistent.
+     return 50;
+   }
+ 
+@@ -159,7 +168,7 @@ double NetworkInformation::downlink() {
+   }
+ 
+   if (!IsObserving()) {
+-    // Return a typical desktop Chrome downlink (10 Mbps) matching the RTT fix.
++    // Paired with rtt()=50 and effectiveType()=4g for a consistent fast profile.
+     return 10.0;
+   }
+ 
